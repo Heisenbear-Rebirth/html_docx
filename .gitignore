@@ -56,3 +56,7 @@ docx/*-batch-out/
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Claude Code local-only preferences
+CLAUDE.local.md
+.claude/settings.local.json

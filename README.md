@@ -21,6 +21,89 @@ Unsafe edits must fail.
 For the full usage and design explanation, read
 [`USAGE_AND_PRINCIPLES.md`](USAGE_AND_PRINCIPLES.md).
 
+## Using With Claude Code
+
+This repository is already configured for Claude Code.
+
+Claude Code reads `CLAUDE.md`, not `AGENTS.md`, so this repo keeps a small
+`CLAUDE.md` file that imports the canonical agent rules:
+
+```markdown
+@AGENTS.md
+```
+
+The project-level Claude Code skill is checked in at:
+
+```text
+.claude/skills/hdocx-agent/SKILL.md
+```
+
+To use it in this repository:
+
+```powershell
+git clone https://github.com/Heisenbear-Rebirth/html_docx.git
+cd html_docx
+claude
+```
+
+Inside Claude Code, invoke the skill directly when you want strict DOCX editing:
+
+```text
+/hdocx-agent
+```
+
+You can also ask naturally, for example:
+
+```text
+Use H-DOCX to audit docx/test.docx and prove whether it round-trips byte-identically.
+```
+
+Claude Code should load the skill automatically for relevant DOCX/H-DOCX tasks,
+because the skill description names DOCX inspection, editing, round-trip,
+validation, pressure testing, and layout preservation.
+
+For a clean first check inside Claude Code, ask it to run:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m html_docx doctor
+python -m unittest discover -s tests
+python -m html_docx generate-fixtures --out pressure-fixtures --force --report pressure-fixtures.json
+python -m html_docx batch-check pressure-fixtures --work pressure-work --out pressure-out --force --report pressure.json
+```
+
+For a real DOCX edit, the Claude Code workflow is:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m html_docx audit input.docx --report audit.json
+python -m html_docx export input.docx --out work.hdocx --force
+python -m html_docx inspect work.hdocx --kind node --id p-000001
+# Claude edits work.hdocx/document.html or work.hdocx/agent.edits.hcss
+python -m html_docx plan work.hdocx --report plan.json
+python -m html_docx apply work.hdocx --out output.docx --report apply.json
+python -m html_docx diff input.docx output.docx --report diff.json
+```
+
+To reuse this tool from another Claude Code workspace, prefer one of these
+workspace-local approaches:
+
+- Clone or vendor this repository inside that workspace and run Claude Code from
+  the repository root when editing DOCX files.
+- Add this repository as an approved extra directory with Claude Code's
+  `--add-dir` only when you intentionally want Claude Code to read the H-DOCX
+  project skill from this checkout.
+- Install the built wheel into that workspace's own `.venv`; do not install it
+  globally.
+
+Do not put private preferences or machine-specific permissions in tracked files.
+Use `CLAUDE.local.md` or `.claude/settings.local.json`; both are ignored by git.
+
+Claude Code references:
+
+- [CLAUDE.md project memory](https://code.claude.com/docs/en/memory)
+- [Claude Code skills](https://code.claude.com/docs/en/skills)
+
 ## Current Capabilities
 
 - Byte-identical unmodified roundtrip.

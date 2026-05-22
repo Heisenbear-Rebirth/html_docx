@@ -12,6 +12,7 @@ dependencies = []
 
 [project.scripts]
 html-docx = "html_docx.cli:main"
+html-docx-mcp = "html_docx.mcp_server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -46,9 +46,10 @@ controlled edits, and agent workflows.
 
 Current local validation at the time of this release:
 
-- `66` unit tests passing.
+- `69` unit tests passing.
 - Built-in pressure fixture round-trip: `6/6` byte-identical.
 - Real sample round-trip: byte-identical and semantically identical.
+- MCP stdio smoke test passing.
 - Optional render QA is supported when LibreOffice/soffice is available.
 
 ## Requirements
@@ -84,30 +85,25 @@ These commands do not need network access and do not modify global Python state.
 
 ### Install Once For All Workspaces
 
-To make the CLI and agent skills available outside this repository:
-
 ```powershell
-.\scripts\install-hdocx.ps1 -All -AddToUserPath -CodexFallbackAgent
+.\scripts\install-hdocx.ps1 -All -AddToUserPath
 ```
 
-The installer writes to user-level locations only:
+This installs the CLI, installs the local stdio MCP server command, and adds
+MCP configuration for Codex and Claude Code when their CLIs/config locations are
+available. It writes to user-level locations only:
 
 ```text
 %USERPROFILE%\.hdocx\                 # isolated CLI venv and command shims
-%CODEX_HOME%\skills\hdocx-agent       # Codex skill, default %USERPROFILE%\.codex\skills\hdocx-agent
-%USERPROFILE%\.claude\skills\hdocx-agent
+%CODEX_HOME%\config.toml              # Codex MCP server block, default %USERPROFILE%\.codex\config.toml
+Claude Code user MCP config           # via claude mcp add --scope user
 ```
-
-`-CodexFallbackAgent` also adds a small marked block to
-`%CODEX_HOME%\AGENTS.md` that points Codex to the installed skill and CLI. The
-installer backs up the previous file before adding this block. This fallback is
-useful when a Codex build does not automatically enumerate user-installed
-skills.
 
 Open a new terminal after using `-AddToUserPath`, then verify:
 
 ```powershell
 html-docx doctor
+'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | html-docx-mcp
 ```
 
 Preview the install without writing files:
@@ -119,17 +115,23 @@ Preview the install without writing files:
 After installation, a diagnostic report is written to:
 
 ```text
-%USERPROFILE%\.hdocx\install-report.json
+%USERPROFILE%\.hdocx\mcp-install-report.json
 ```
 
-Install only the agent skills:
+Install only the CLI/MCP command without configuring clients:
 
 ```powershell
-.\scripts\install-hdocx.ps1 -Codex -Claude
+.\scripts\install-hdocx.ps1 -Tool -AddToUserPath
 ```
 
-Use `-Force` to replace an existing installed skill. Restart Codex or Claude
-Code after installing user-level skills.
+Configure only Codex or Claude Code after the command already exists:
+
+```powershell
+.\scripts\install-hdocx.ps1 -Codex
+.\scripts\install-hdocx.ps1 -Claude
+```
+
+Restart Codex or Claude Code after changing MCP configuration.
 
 ## Editing Workflow
 
@@ -218,6 +220,9 @@ Important rules:
 | `batch-check` | Run `check` over a file or directory. |
 | `generate-fixtures` | Generate synthetic pressure DOCX fixtures. |
 | `render-check` | Optionally render DOCX through LibreOffice/soffice. |
+| `mcp` | Run the stdio MCP server. |
+
+The package also installs a dedicated `html-docx-mcp` command for MCP clients.
 
 ## H-CSS Examples
 
@@ -328,22 +333,36 @@ list-items {
 }
 ```
 
-## Agent Integration
+## MCP Agent Integration
 
-The repository includes both repository-level and user-installable agent
-instructions:
+The repository exposes the DOCX workflow as a local stdio MCP server:
 
 ```text
-AGENTS.md
-CLAUDE.md
-skills/hdocx-agent/SKILL.md
-.claude/skills/hdocx-agent/SKILL.md
+html-docx-mcp
 ```
 
-For normal use, run the installer once and let the agent load the user-level
-skill from its standard skill directory. For strict workspace isolation, keep
-the repository cloned inside the workspace and point the agent to the repository
-rules and skill files.
+Codex configuration is written as a managed block in `%CODEX_HOME%\config.toml`:
+
+```toml
+[mcp_servers.hdocx]
+command = "C:\\Users\\YOU\\.hdocx\\bin\\html-docx-mcp.cmd"
+args = []
+```
+
+Claude Code can be configured with:
+
+```powershell
+claude mcp add --transport stdio --scope user hdocx -- "C:\Users\YOU\.hdocx\bin\html-docx-mcp.cmd"
+```
+
+The MCP server provides tools such as `hdocx_audit`, `hdocx_export`,
+`hdocx_plan`, `hdocx_apply`, `hdocx_diff`, `hdocx_check`,
+`hdocx_batch_check`, `hdocx_inspect`, and `hdocx_render_check`.
+
+Every file-oriented tool accepts an optional `root` argument. All file paths must
+resolve inside that root. If `root` is omitted, the server uses
+`HDOCX_MCP_ROOT`, then `CLAUDE_PROJECT_DIR`, then the MCP server current
+directory.
 
 Agent-facing policy:
 
@@ -412,9 +431,7 @@ Word features are ordinary HTML.
 ```text
 src/html_docx/                  # CLI and library implementation
 tests/                          # unit and round-trip tests
-scripts/install-hdocx.ps1       # user-level CLI and skill installer
-skills/hdocx-agent/             # Codex skill package
-.claude/skills/hdocx-agent/     # Claude Code project skill
+scripts/install-hdocx.ps1       # user-level CLI and MCP installer
 AGENTS.md                       # repository-level agent rules
 CLAUDE.md                       # Claude Code entry point
 USAGE_AND_PRINCIPLES.md         # full usage and design explanation

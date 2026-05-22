@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -257,11 +258,101 @@ class CLITests(unittest.TestCase):
             self.assertEqual(main(args), 0)
         with redirect_stdout(StringIO()):
             self.assertEqual(main(args), 0)
-
         report = json.loads((input_dir / "pressure.json").read_text(encoding="utf-8"))
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["summary"], {"failed": 0, "passed": 1, "total": 1})
         self.assertEqual(report["results"][0]["relativePath"], "minimal.docx")
+
+    def test_mcp_stdio_lists_and_calls_tools(self) -> None:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src")
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "tests", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "hdocx_doctor", "arguments": {}}},
+        ]
+        stdin = "\n".join(json.dumps(item) for item in messages) + "\n"
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "html_docx.mcp_server"],
+            input=stdin,
+            text=True,
+            capture_output=True,
+            env=env,
+            cwd=ROOT,
+            timeout=20,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+        self.assertEqual([item["id"] for item in responses], [1, 2, 3])
+        self.assertEqual(responses[0]["result"]["capabilities"]["tools"]["listChanged"], False)
+        tool_names = {tool["name"] for tool in responses[1]["result"]["tools"]}
+        self.assertIn("hdocx_check", tool_names)
+        self.assertIn("hdocx_export", tool_names)
+        self.assertFalse(responses[2]["result"]["isError"])
+        self.assertTrue(responses[2]["result"]["structuredContent"]["ok"])
+
+    def test_mcp_rejects_paths_outside_root(self) -> None:
+        from html_docx.mcp_server import HDocxMcpServer
+
+        server = HDocxMcpServer()
+        root = TMP / "mcp-root"
+        root.mkdir()
+        outside = ROOT / "outside.docx"
+
+        response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_audit",
+                    "arguments": {"root": str(root), "input": str(outside)},
+                },
+            }
+        )
+
+        self.assertIsNotNone(response)
+        result = response["result"]
+        self.assertTrue(result["isError"])
+        payload = result["structuredContent"]
+        self.assertEqual(payload["error"]["code"], "MCP_PATH_OUTSIDE_ROOT")
+
+    def test_mcp_uses_environment_root_when_root_is_omitted(self) -> None:
+        from html_docx.mcp_server import HDocxMcpServer
+
+        server = HDocxMcpServer()
+        root = TMP / "mcp-env-root"
+        root.mkdir()
+        _make_minimal_docx(root / "input.docx")
+        previous = os.environ.get("HDOCX_MCP_ROOT")
+        os.environ["HDOCX_MCP_ROOT"] = str(root)
+        try:
+            response = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 11,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "hdocx_audit",
+                        "arguments": {"input": "input.docx"},
+                    },
+                }
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("HDOCX_MCP_ROOT", None)
+            else:
+                os.environ["HDOCX_MCP_ROOT"] = previous
+
+        self.assertIsNotNone(response)
+        result = response["result"]
+        self.assertFalse(result["isError"], result)
+        payload = result["structuredContent"]
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["input"], str((root / "input.docx").resolve()))
 
     def test_inspect_style_list_table_and_image(self) -> None:
         styled_docx = TMP / "styled.docx"

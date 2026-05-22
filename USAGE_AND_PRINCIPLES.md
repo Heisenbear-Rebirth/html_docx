@@ -193,8 +193,11 @@ python -m html_docx render-check output.docx --out render-out --force --allow-mi
 Agent 应先阅读：
 
 - `AGENTS.md`：仓库内硬规则。
-- `skills/hdocx-agent/SKILL.md`：可复用 skill 入口。
 - `AGENT_GUIDE.md`：详细命令与编辑示例。
+
+跨工作区使用时，推荐通过 `html-docx-mcp` 暴露 MCP tools，而不是依赖 agent
+自动发现 skill。MCP tools 会复用同一套 audit/export/plan/apply/diff/check
+逻辑，并要求所有路径位于声明的工作区 root 内。
 
 Agent 可以编辑：
 
@@ -239,7 +242,7 @@ Agent 不得编辑：
 - `README.md`：项目快速介绍。
 - `AGENTS.md`：agent 硬规则。
 - `AGENT_GUIDE.md`：agent 操作手册。
-- `skills/hdocx-agent/SKILL.md`：Codex skill 版本的工作流。
+- `src/html_docx/mcp_server.py`：H-DOCX MCP stdio server。
 - `FUNCTIONAL_SPEC.md`：功能边界。
 - `HDOCX_HTML_DESIGN.md`：H-DOCX/HTML 设计。
 - `SELECTOR_AND_REUSE_DESIGN.md`：选择器与复用设计。

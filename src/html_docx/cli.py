@@ -113,6 +113,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--report", type=Path)
     doctor_parser.set_defaults(func=_cmd_doctor)
 
+    mcp_parser = subparsers.add_parser("mcp", help="Run the H-DOCX MCP stdio server")
+    mcp_parser.set_defaults(func=_cmd_mcp)
+
     return parser
 
 
@@ -192,6 +195,12 @@ def _cmd_inspect(args: argparse.Namespace) -> dict[str, Any]:
 
 def _cmd_doctor(args: argparse.Namespace) -> dict[str, Any]:
     return doctor_report()
+
+
+def _cmd_mcp(args: argparse.Namespace) -> dict[str, Any]:
+    from .mcp_server import main as mcp_main
+
+    raise SystemExit(mcp_main())
 
 
 def _print_json(payload: dict[str, Any]) -> None:

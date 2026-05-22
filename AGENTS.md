@@ -17,7 +17,7 @@ All operations must stay inside the current repository directory.
   ask the user first.
 - Do not run `scripts/install-hdocx.ps1` unless the user explicitly asks for
   user-level installation. That script is intentionally for configuring
-  user-level CLI and agent skills outside this repository.
+  user-level CLI and MCP clients outside this repository.
 
 ## Core Contract
 
@@ -133,8 +133,6 @@ round-trips.
 
 ## Reference Documents
 
-- `skills/hdocx-agent/SKILL.md`: installable/local Codex skill for H-DOCX
-  agent workflows.
 - `AGENT_GUIDE.md`: detailed agent workflow and editing examples.
 - `FUNCTIONAL_SPEC.md`: product-level functional boundary.
 - `HDOCX_HTML_DESIGN.md`: HTML/H-DOCX representation design.

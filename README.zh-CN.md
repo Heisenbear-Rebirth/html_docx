@@ -43,9 +43,10 @@ H-DOCX 采用不同策略：
 
 当前版本的本地验收结果：
 
-- `66` 个单元测试通过。
+- `69` 个单元测试通过。
 - 内置压力 fixture 往返：`6/6` 字节级一致。
 - 真实样例往返：字节级一致，语义节点一致。
+- MCP stdio smoke test 通过。
 - 如果系统提供 LibreOffice/soffice，可执行可选渲染 QA。
 
 ## 环境要求
@@ -81,29 +82,26 @@ python -m html_docx batch-check pressure-fixtures --work pressure-work --out pre
 
 ### 一次安装，全工作区可用
 
-如果希望在任意目录使用 `html-docx`、Codex skill 和 Claude Code skill，在仓库
-根目录运行：
+在仓库根目录运行：
 
 ```powershell
-.\scripts\install-hdocx.ps1 -All -AddToUserPath -CodexFallbackAgent
+.\scripts\install-hdocx.ps1 -All -AddToUserPath
 ```
 
-安装脚本只写入用户级位置：
+这会安装 CLI、本地 stdio MCP server 命令，并在可用时写入 Codex 和 Claude Code
+的 MCP 配置。安装脚本只写入用户级位置：
 
 ```text
 %USERPROFILE%\.hdocx\                 # 隔离 CLI venv 和命令 shim
-%CODEX_HOME%\skills\hdocx-agent       # Codex skill，默认 %USERPROFILE%\.codex\skills\hdocx-agent
-%USERPROFILE%\.claude\skills\hdocx-agent
+%CODEX_HOME%\config.toml              # Codex MCP server 配置块，默认 %USERPROFILE%\.codex\config.toml
+Claude Code 用户级 MCP 配置            # 通过 claude mcp add --scope user 写入
 ```
-
-`-CodexFallbackAgent` 还会向 `%CODEX_HOME%\AGENTS.md` 写入一小段带标记的
-fallback 规则，指向已安装的 skill 和 CLI。安装器会先备份原文件。这个 fallback
-用于处理某些 Codex 版本没有自动枚举用户级 skill 的情况。
 
 使用 `-AddToUserPath` 后，请打开新终端再验证：
 
 ```powershell
 html-docx doctor
+'{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | html-docx-mcp
 ```
 
 只预览安装路径，不写入文件：
@@ -115,17 +113,23 @@ html-docx doctor
 安装后会生成诊断报告：
 
 ```text
-%USERPROFILE%\.hdocx\install-report.json
+%USERPROFILE%\.hdocx\mcp-install-report.json
 ```
 
-只安装 Agent skills，不安装 CLI：
+只安装 CLI/MCP 命令，不配置客户端：
 
 ```powershell
-.\scripts\install-hdocx.ps1 -Codex -Claude
+.\scripts\install-hdocx.ps1 -Tool -AddToUserPath
 ```
 
-如需替换已有 skill，使用 `-Force`。安装用户级 skill 后，请重启 Codex 或
-Claude Code。
+如果命令已经存在，只配置 Codex 或 Claude Code：
+
+```powershell
+.\scripts\install-hdocx.ps1 -Codex
+.\scripts\install-hdocx.ps1 -Claude
+```
+
+修改 MCP 配置后，请重启 Codex 或 Claude Code。
 
 ## 编辑工作流
 
@@ -211,6 +215,9 @@ work.hdocx/
 | `batch-check` | 对文件或目录批量执行 `check`。 |
 | `generate-fixtures` | 生成内置压力 DOCX fixture。 |
 | `render-check` | 通过 LibreOffice/soffice 执行可选渲染检查。 |
+| `mcp` | 启动 stdio MCP server。 |
+
+包也会安装专用的 `html-docx-mcp` 命令，供 MCP 客户端使用。
 
 ## H-CSS 示例
 
@@ -321,19 +328,35 @@ list-items {
 }
 ```
 
-## Agent 集成
+## MCP Agent 集成
 
-仓库包含仓库级和用户级可安装的 Agent 说明：
+仓库把 DOCX 工作流暴露为本地 stdio MCP server：
 
 ```text
-AGENTS.md
-CLAUDE.md
-skills/hdocx-agent/SKILL.md
-.claude/skills/hdocx-agent/SKILL.md
+html-docx-mcp
 ```
 
-普通用户建议运行安装脚本一次，让 Agent 从自己的用户级 skill 目录加载规则。若需要
-严格工作区隔离，则把本仓库克隆到目标工作区内，并让 Agent 阅读仓库规则和 skill。
+Codex 配置会以托管 block 的形式写入 `%CODEX_HOME%\config.toml`：
+
+```toml
+[mcp_servers.hdocx]
+command = "C:\\Users\\YOU\\.hdocx\\bin\\html-docx-mcp.cmd"
+args = []
+```
+
+Claude Code 可用以下命令配置：
+
+```powershell
+claude mcp add --transport stdio --scope user hdocx -- "C:\Users\YOU\.hdocx\bin\html-docx-mcp.cmd"
+```
+
+MCP server 提供 `hdocx_audit`、`hdocx_export`、`hdocx_plan`、
+`hdocx_apply`、`hdocx_diff`、`hdocx_check`、`hdocx_batch_check`、
+`hdocx_inspect`、`hdocx_render_check` 等 tools。
+
+每个面向文件的 tool 都支持可选 `root` 参数。所有文件路径必须解析到该 root 内；
+如果不传 `root`，server 会依次使用 `HDOCX_MCP_ROOT`、`CLAUDE_PROJECT_DIR`，
+最后才使用 MCP server 当前目录。
 
 Agent 策略：
 
@@ -396,9 +419,7 @@ Agent 策略：
 ```text
 src/html_docx/                  # CLI 和库实现
 tests/                          # 单元测试和往返测试
-scripts/install-hdocx.ps1       # 用户级 CLI 和 skill 安装脚本
-skills/hdocx-agent/             # Codex skill 包
-.claude/skills/hdocx-agent/     # Claude Code 项目 skill
+scripts/install-hdocx.ps1       # 用户级 CLI 和 MCP 安装脚本
 AGENTS.md                       # 仓库级 Agent 规则
 CLAUDE.md                       # Claude Code 入口
 USAGE_AND_PRINCIPLES.md         # 完整使用与原理说明

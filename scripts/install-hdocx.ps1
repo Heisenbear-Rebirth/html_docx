@@ -5,11 +5,9 @@ param(
   [switch]$Claude,
   [switch]$Force,
   [switch]$AddToUserPath,
-  [switch]$CodexFallbackAgent,
   [switch]$DryRun,
   [string]$ToolHome,
   [string]$CodexHome,
-  [string]$ClaudeHome,
   [string]$Python = "python"
 )
 
@@ -32,28 +30,17 @@ function Ensure-Directory($Path) {
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
 
-function Copy-Skill($Source, $Destination) {
-  if (-not (Test-Path -LiteralPath $Source)) {
-    throw "Missing skill source: $Source"
-  }
-
-  if (Test-Path -LiteralPath $Destination) {
-    if (-not $Force) {
-      throw "Destination exists: $Destination. Re-run with -Force to replace it."
-    }
-    if ($DryRun) {
-      Write-Step "Would remove existing skill: $Destination"
-    } else {
-      Remove-Item -LiteralPath $Destination -Recurse -Force
-    }
-  }
-
-  Ensure-Directory (Split-Path -Parent $Destination)
+function Write-Text($Path, $Value, $Encoding = "UTF8") {
   if ($DryRun) {
-    Write-Step "Would copy skill: $Source -> $Destination"
-  } else {
-    Copy-Item -LiteralPath $Source -Destination $Destination -Recurse
+    Write-Step "Would write file: $Path"
+    return
   }
+  Set-Content -LiteralPath $Path -Value $Value -Encoding $Encoding
+}
+
+function To-TomlString($Value) {
+  $escaped = $Value.Replace("\", "\\").Replace('"', '\"')
+  return '"' + $escaped + '"'
 }
 
 function Install-Tool($RepoRoot, $ResolvedToolHome) {
@@ -63,8 +50,7 @@ function Install-Tool($RepoRoot, $ResolvedToolHome) {
   $cachePath = Join-Path $ResolvedToolHome "pip-cache"
   $pythonExe = Join-Path $venvPath "Scripts\python.exe"
   $htmlDocxExe = Join-Path $venvPath "Scripts\html-docx.exe"
-  $cmdShim = Join-Path $binPath "html-docx.cmd"
-  $psShim = Join-Path $binPath "html-docx.ps1"
+  $mcpExe = Join-Path $venvPath "Scripts\html-docx-mcp.exe"
 
   Ensure-Directory $ResolvedToolHome
   Ensure-Directory $binPath
@@ -86,19 +72,28 @@ function Install-Tool($RepoRoot, $ResolvedToolHome) {
     if ($LASTEXITCODE -ne 0) {
       throw "pip install failed with exit code $LASTEXITCODE"
     }
+  }
 
-    $cmdContent = "@echo off`r`n""%~dp0..\venv\Scripts\html-docx.exe"" %*`r`n"
-    Set-Content -LiteralPath $cmdShim -Value $cmdContent -Encoding ASCII
+  $htmlCmd = Join-Path $binPath "html-docx.cmd"
+  $htmlPs1 = Join-Path $binPath "html-docx.ps1"
+  $mcpCmd = Join-Path $binPath "html-docx-mcp.cmd"
+  $mcpPs1 = Join-Path $binPath "html-docx-mcp.ps1"
 
-    $psContent = @'
+  Write-Text $htmlCmd "@echo off`r`n""%~dp0..\venv\Scripts\html-docx.exe"" %*`r`n" "ASCII"
+  Write-Text $mcpCmd "@echo off`r`n""%~dp0..\venv\Scripts\html-docx-mcp.exe"" %*`r`n" "ASCII"
+  Write-Text $htmlPs1 @'
 $exe = Join-Path $PSScriptRoot "..\venv\Scripts\html-docx.exe"
 & $exe @args
 exit $LASTEXITCODE
 '@
-    Set-Content -LiteralPath $psShim -Value $psContent -Encoding UTF8
-  }
+  Write-Text $mcpPs1 @'
+$exe = Join-Path $PSScriptRoot "..\venv\Scripts\html-docx-mcp.exe"
+& $exe @args
+exit $LASTEXITCODE
+'@
 
   Write-Step "CLI shim directory: $binPath"
+  Write-Step "MCP command: $mcpCmd"
 
   if ($AddToUserPath) {
     $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -123,64 +118,38 @@ exit $LASTEXITCODE
     Write-Step "To use without editing PATH in this terminal:"
     Write-Host "`$env:PATH = `"$binPath;`$env:PATH`""
   }
-}
-
-function Test-Skill($Path) {
-  $skillFile = Join-Path $Path "SKILL.md"
-  if (-not (Test-Path -LiteralPath $skillFile)) {
-    return @{
-      ok = $false
-      path = $Path
-      reason = "missing SKILL.md"
-    }
-  }
-
-  $content = Get-Content -LiteralPath $skillFile -Raw
-  if ($content -notmatch "(?ms)^---\s*\r?\n.*?^name:\s*hdocx-agent\s*$.*?^description:\s*.+?\r?\n---") {
-    return @{
-      ok = $false
-      path = $Path
-      reason = "invalid or missing YAML frontmatter"
-    }
-  }
 
   return @{
-    ok = $true
-    path = $Path
-    reason = $null
+    binPath = $binPath
+    htmlDocxCmd = $htmlCmd
+    mcpCmd = $mcpCmd
+    htmlDocxExe = $htmlDocxExe
+    mcpExe = $mcpExe
   }
 }
 
-function Update-CodexFallbackAgent($ResolvedCodexHome, $ResolvedToolHome) {
-  $agentFile = Join-Path $ResolvedCodexHome "AGENTS.md"
-  $skillPath = Join-Path $ResolvedCodexHome "skills\hdocx-agent\SKILL.md"
-  $cliPath = Join-Path $ResolvedToolHome "bin\html-docx.cmd"
-  $startMarker = "<!-- hdocx-agent-install:start -->"
-  $endMarker = "<!-- hdocx-agent-install:end -->"
+function Update-CodexMcpConfig($ResolvedCodexHome, $McpCommand) {
+  Ensure-Directory $ResolvedCodexHome
+  $configPath = Join-Path $ResolvedCodexHome "config.toml"
+  $startMarker = "# hdocx-mcp-install:start"
+  $endMarker = "# hdocx-mcp-install:end"
   $block = @"
 $startMarker
-
-## H-DOCX Agent Fallback
-
-When a task asks to inspect, edit, round-trip, validate, or pressure-test DOCX
-files through H-DOCX/html_docx, use the installed H-DOCX skill and CLI:
-
-- Skill: ``$skillPath``
-- CLI: ``$cliPath``
-
-If the Codex skill list does not show `hdocx-agent`, manually read the skill
-file above and follow it as the workflow. Keep all task files inside the active
-workspace unless the user explicitly approves otherwise.
-
+[mcp_servers.hdocx]
+command = $(To-TomlString $McpCommand)
+args = []
 $endMarker
 "@
 
-  Ensure-Directory $ResolvedCodexHome
-
-  if (Test-Path -LiteralPath $agentFile) {
-    $existing = Get-Content -LiteralPath $agentFile -Raw -ErrorAction Stop
+  if (Test-Path -LiteralPath $configPath) {
+    $existing = Get-Content -LiteralPath $configPath -Raw -ErrorAction Stop
   } else {
     $existing = ""
+  }
+
+  $hasManualHdocx = ($existing -match "(?m)^\[mcp_servers\.hdocx\]") -and ($existing -notmatch [regex]::Escape($startMarker))
+  if ($hasManualHdocx -and (-not $Force)) {
+    throw "Codex config already contains [mcp_servers.hdocx]. Re-run with -Force to replace the managed block manually."
   }
 
   $pattern = "(?s)\r?\n?$([regex]::Escape($startMarker)).*?$([regex]::Escape($endMarker))\r?\n?"
@@ -188,75 +157,90 @@ $endMarker
   $newContent = ($clean.TrimEnd() + "`r`n`r`n" + $block.TrimEnd() + "`r`n")
 
   if ($DryRun) {
-    Write-Step "Would update Codex fallback AGENTS.md: $agentFile"
+    Write-Step "Would update Codex MCP config: $configPath"
+    Write-Host $block
     return
   }
 
-  if ((Test-Path -LiteralPath $agentFile) -and ($existing -notmatch [regex]::Escape($startMarker))) {
+  if ((Test-Path -LiteralPath $configPath) -and ($existing -notmatch [regex]::Escape($startMarker))) {
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-    $backup = "$agentFile.hdocx-backup-$stamp"
-    Copy-Item -LiteralPath $agentFile -Destination $backup -Force
-    Write-Step "Backed up Codex AGENTS.md: $backup"
+    $backup = "$configPath.hdocx-backup-$stamp"
+    Copy-Item -LiteralPath $configPath -Destination $backup -Force
+    Write-Step "Backed up Codex config: $backup"
   }
 
-  Set-Content -LiteralPath $agentFile -Value $newContent -Encoding UTF8
-  Write-Step "Updated Codex fallback AGENTS.md: $agentFile"
+  Set-Content -LiteralPath $configPath -Value $newContent -Encoding UTF8
+  Write-Step "Updated Codex MCP config: $configPath"
 }
 
-function Write-InstallReport($ResolvedToolHome, $ResolvedCodexHome, $ResolvedClaudeHome) {
-  $binPath = Join-Path $ResolvedToolHome "bin"
-  $htmlDocxCmd = Join-Path $binPath "html-docx.cmd"
-  $codexSkill = Join-Path $ResolvedCodexHome "skills\hdocx-agent"
-  $claudeSkill = Join-Path $ResolvedClaudeHome "skills\hdocx-agent"
+function Configure-ClaudeMcp($McpCommand) {
+  $claude = Get-Command claude -ErrorAction SilentlyContinue
+  $manual = "claude mcp add --transport stdio --scope user hdocx -- `"$McpCommand`""
+
+  if (-not $claude) {
+    Write-Step "Claude Code CLI was not found. Run this manually after installing Claude Code:"
+    Write-Host $manual
+    return
+  }
+
+  if ($DryRun) {
+    Write-Step "Would configure Claude Code MCP:"
+    Write-Host $manual
+    return
+  }
+
+  & $claude.Source mcp add --transport stdio --scope user hdocx -- $McpCommand
+  if ($LASTEXITCODE -ne 0) {
+    throw "claude mcp add failed with exit code $LASTEXITCODE. You can run manually: $manual"
+  }
+  Write-Step "Configured Claude Code MCP server: hdocx"
+}
+
+function Write-InstallReport($ResolvedToolHome, $ResolvedCodexHome, $ToolInfo) {
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
   $pathContainsBin = $false
   if ($userPath) {
     $pathContainsBin = @(($userPath -split ";") | Where-Object {
-      $_.TrimEnd("\") -ieq $binPath.TrimEnd("\")
+      $_.TrimEnd("\") -ieq $ToolInfo.binPath.TrimEnd("\")
     }).Count -gt 0
   }
 
-  $cliDoctor = @{
+  $doctor = @{
     ok = $false
     exitCode = $null
     output = $null
   }
-
-  if ((Test-Path -LiteralPath $htmlDocxCmd) -and (-not $DryRun)) {
-    $doctorOutput = & $htmlDocxCmd doctor 2>&1
-    $cliDoctor.exitCode = $LASTEXITCODE
-    $cliDoctor.ok = ($LASTEXITCODE -eq 0)
-    $cliDoctor.output = ($doctorOutput | Out-String).Trim()
+  if ((Test-Path -LiteralPath $ToolInfo.htmlDocxCmd) -and (-not $DryRun)) {
+    $doctorOutput = & $ToolInfo.htmlDocxCmd doctor 2>&1
+    $doctor.exitCode = $LASTEXITCODE
+    $doctor.ok = ($LASTEXITCODE -eq 0)
+    $doctor.output = ($doctorOutput | Out-String).Trim()
   }
 
+  $codexConfig = Join-Path $ResolvedCodexHome "config.toml"
   $report = [ordered]@{
     generatedAt = (Get-Date).ToString("o")
     toolHome = $ResolvedToolHome
     cli = [ordered]@{
-      binPath = $binPath
-      command = $htmlDocxCmd
-      exists = Test-Path -LiteralPath $htmlDocxCmd
+      htmlDocx = $ToolInfo.htmlDocxCmd
+      htmlDocxMcp = $ToolInfo.mcpCmd
       userPathContainsBin = $pathContainsBin
-      doctor = $cliDoctor
+      doctor = $doctor
     }
-    codex = [ordered]@{
-      home = $ResolvedCodexHome
-      skill = Test-Skill $codexSkill
-      fallbackAgent = Join-Path $ResolvedCodexHome "AGENTS.md"
-      fallbackAgentContainsHdocx = if (Test-Path -LiteralPath (Join-Path $ResolvedCodexHome "AGENTS.md")) {
-        ((Get-Content -LiteralPath (Join-Path $ResolvedCodexHome "AGENTS.md") -Raw) -match "hdocx-agent-install:start")
+    mcp = [ordered]@{
+      command = $ToolInfo.mcpCmd
+      codexConfig = $codexConfig
+      codexConfigContainsHdocx = if (Test-Path -LiteralPath $codexConfig) {
+        ((Get-Content -LiteralPath $codexConfig -Raw) -match "hdocx-mcp-install:start")
       } else {
         $false
       }
-    }
-    claude = [ordered]@{
-      home = $ResolvedClaudeHome
-      skill = Test-Skill $claudeSkill
+      claudeAddCommand = "claude mcp add --transport stdio --scope user hdocx -- `"$($ToolInfo.mcpCmd)`""
     }
   }
 
   Ensure-Directory $ResolvedToolHome
-  $reportPath = Join-Path $ResolvedToolHome "install-report.json"
+  $reportPath = Join-Path $ResolvedToolHome "mcp-install-report.json"
   if ($DryRun) {
     Write-Step "Would write install report: $reportPath"
     Write-Host ($report | ConvertTo-Json -Depth 8)
@@ -266,7 +250,7 @@ function Write-InstallReport($ResolvedToolHome, $ResolvedCodexHome, $ResolvedCla
   }
 }
 
-if (-not ($All -or $Tool -or $Codex -or $Claude -or $CodexFallbackAgent)) {
+if (-not ($All -or $Tool -or $Codex -or $Claude)) {
   $All = $true
 }
 
@@ -288,52 +272,36 @@ if (-not $CodexHome) {
     $CodexHome = Join-Path $HOME ".codex"
   }
 }
-if (-not $ClaudeHome) {
-  $ClaudeHome = Join-Path $HOME ".claude"
-}
 
 $ToolHome = [System.IO.Path]::GetFullPath($ToolHome)
 $CodexHome = [System.IO.Path]::GetFullPath($CodexHome)
-$ClaudeHome = [System.IO.Path]::GetFullPath($ClaudeHome)
 
 Write-Step "Repository: $repoRoot"
 
+$toolInfo = @{
+  binPath = Join-Path $ToolHome "bin"
+  htmlDocxCmd = Join-Path $ToolHome "bin\html-docx.cmd"
+  mcpCmd = Join-Path $ToolHome "bin\html-docx-mcp.cmd"
+}
+
 if ($Tool) {
-  Install-Tool $repoRoot $ToolHome
+  $toolInfo = Install-Tool $repoRoot $ToolHome
 }
 
 if ($Codex) {
-  $codexSource = Join-Path $repoRoot "skills\hdocx-agent"
-  $codexDest = Join-Path $CodexHome "skills\hdocx-agent"
-  Copy-Skill $codexSource $codexDest
-  if ($DryRun) {
-    Write-Step "Would install Codex skill: $codexDest"
-  } else {
-    Write-Step "Installed Codex skill: $codexDest"
-  }
-}
-
-if ($CodexFallbackAgent) {
-  Update-CodexFallbackAgent $CodexHome $ToolHome
+  Update-CodexMcpConfig $CodexHome $toolInfo.mcpCmd
 }
 
 if ($Claude) {
-  $claudeSource = Join-Path $repoRoot ".claude\skills\hdocx-agent"
-  $claudeDest = Join-Path $ClaudeHome "skills\hdocx-agent"
-  Copy-Skill $claudeSource $claudeDest
-  if ($DryRun) {
-    Write-Step "Would install Claude Code skill: $claudeDest"
-  } else {
-    Write-Step "Installed Claude Code skill: $claudeDest"
-  }
+  Configure-ClaudeMcp $toolInfo.mcpCmd
 }
 
-Write-InstallReport $ToolHome $CodexHome $ClaudeHome
+Write-InstallReport $ToolHome $CodexHome $toolInfo
 
 Write-Step "Done."
 if ($Codex) {
-  Write-Step "Restart Codex so it discovers newly installed skills."
+  Write-Step "Restart Codex so it loads the hdocx MCP server."
 }
 if ($Claude) {
-  Write-Step "Restart Claude Code if it was already running before this install."
+  Write-Step "Restart Claude Code, or run /mcp inside Claude Code to verify the hdocx server."
 }

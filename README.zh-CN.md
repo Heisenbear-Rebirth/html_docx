@@ -43,7 +43,7 @@ H-DOCX 采用不同策略：
 
 当前版本的本地验收结果：
 
-- `69` 个单元测试通过。
+- `70` 个单元测试通过。
 - 内置压力 fixture 往返：`6/6` 字节级一致。
 - 真实样例往返：字节级一致，语义节点一致。
 - MCP stdio smoke test 通过。
@@ -80,56 +80,51 @@ python -m html_docx batch-check pressure-fixtures --work pressure-work --out pre
 
 这些命令不需要网络，也不会修改全局 Python 环境。
 
-### 一次安装，全工作区可用
+### 将命令加入 PATH
 
-在仓库根目录运行：
-
-```powershell
-.\scripts\install-hdocx.ps1 -All -AddToUserPath
-```
-
-这会安装 CLI、本地 stdio MCP server 命令，并在可用时写入 Codex 和 Claude Code
-的 MCP 配置。安装脚本只写入用户级位置：
+H-DOCX 不会自动修改你的 MCP 客户端配置。请把包安装到你自己控制的 Python
+环境里，然后把该环境的命令目录加入 `PATH`，让任意工作区都能直接运行：
 
 ```text
-%USERPROFILE%\.hdocx\                 # 隔离 CLI venv 和命令 shim
-%CODEX_HOME%\config.toml              # Codex MCP server 配置块，默认 %USERPROFILE%\.codex\config.toml
-Claude Code 用户级 MCP 配置            # 通过 claude mcp add --scope user 写入
+html-docx
+html-docx-mcp
 ```
 
-使用 `-AddToUserPath` 后，请打开新终端再验证：
+例如，如果安装在某个 venv 中，Windows 下可以把它的 `Scripts` 目录加入当前终端：
+
+```powershell
+$env:PATH = "C:\Tools\hdocx\.venv\Scripts;$env:PATH"
+```
+
+安装位置由你决定。若要长期可用，请把同一个命令目录写入你的 shell profile 或
+Windows 用户环境变量 `PATH`。
+
+打开新终端后验证：
 
 ```powershell
 html-docx doctor
 '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | html-docx-mcp
 ```
 
-只预览安装路径，不写入文件：
+支持通用 `mcpServers` 结构的客户端可以使用这段 MCP JSON：
 
-```powershell
-.\scripts\install-hdocx.ps1 -All -DryRun
+```json
+{
+  "mcpServers": {
+    "hdocx": {
+      "command": "html-docx-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
-安装后会生成诊断报告：
+如果你的 MCP 客户端外层字段不同，只保留 `hdocx` server object，按客户端要求调整
+外层包装即可。Agent 应在调用具体 tool 时传入当前工作区的 `root` 参数。
+`HDOCX_MCP_ROOT` 只作为客户端无法传 `root` 时的可选兜底；如果省略，server 会继续
+尝试 `CLAUDE_PROJECT_DIR`，最后使用自身当前目录。
 
-```text
-%USERPROFILE%\.hdocx\mcp-install-report.json
-```
-
-只安装 CLI/MCP 命令，不配置客户端：
-
-```powershell
-.\scripts\install-hdocx.ps1 -Tool -AddToUserPath
-```
-
-如果命令已经存在，只配置 Codex 或 Claude Code：
-
-```powershell
-.\scripts\install-hdocx.ps1 -Codex
-.\scripts\install-hdocx.ps1 -Claude
-```
-
-修改 MCP 配置后，请重启 Codex 或 Claude Code。
+修改 MCP 配置后，请重启 MCP 客户端。
 
 ## 编辑工作流
 
@@ -336,23 +331,39 @@ list-items {
 html-docx-mcp
 ```
 
-Codex 配置会以托管 block 的形式写入 `%CODEX_HOME%\config.toml`：
+先把 `html-docx-mcp` 加入 `PATH`，然后在 MCP 客户端中加入 JSON 配置：
 
-```toml
-[mcp_servers.hdocx]
-command = "C:\\Users\\YOU\\.hdocx\\bin\\html-docx-mcp.cmd"
-args = []
-```
-
-Claude Code 可用以下命令配置：
-
-```powershell
-claude mcp add --transport stdio --scope user hdocx -- "C:\Users\YOU\.hdocx\bin\html-docx-mcp.cmd"
+```json
+{
+  "mcpServers": {
+    "hdocx": {
+      "command": "html-docx-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
 MCP server 提供 `hdocx_audit`、`hdocx_export`、`hdocx_plan`、
 `hdocx_apply`、`hdocx_diff`、`hdocx_check`、`hdocx_batch_check`、
-`hdocx_inspect`、`hdocx_render_check` 等 tools。
+`hdocx_inspect`、`hdocx_render_check`、`hdocx_guidance` 等 tools。
+
+它还暴露 agent 可直接读取的 resources 和 prompts：
+
+```text
+hdocx://guide/workflow
+hdocx://guide/writing-format
+hdocx://guide/hcss
+hdocx://guide/acceptance
+hdocx://guide/edge-cases
+
+hdocx_safe_edit
+hdocx_format_change
+hdocx_roundtrip_check
+```
+
+Agent 编辑前应读取相关 resource。若某个 MCP 客户端不展示 resources 或 prompts，
+也可以调用 `hdocx_guidance`，通过普通 tool response 获取同一套书写规则。
 
 每个面向文件的 tool 都支持可选 `root` 参数。所有文件路径必须解析到该 root 内；
 如果不传 `root`，server 会依次使用 `HDOCX_MCP_ROOT`、`CLAUDE_PROJECT_DIR`，
@@ -419,7 +430,6 @@ Agent 策略：
 ```text
 src/html_docx/                  # CLI 和库实现
 tests/                          # 单元测试和往返测试
-scripts/install-hdocx.ps1       # 用户级 CLI 和 MCP 安装脚本
 AGENTS.md                       # 仓库级 Agent 规则
 CLAUDE.md                       # Claude Code 入口
 USAGE_AND_PRINCIPLES.md         # 完整使用与原理说明

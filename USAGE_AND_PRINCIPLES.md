@@ -195,9 +195,9 @@ Agent 应先阅读：
 - `AGENTS.md`：仓库内硬规则。
 - `AGENT_GUIDE.md`：详细命令与编辑示例。
 
-跨工作区使用时，推荐通过 `html-docx-mcp` 暴露 MCP tools，而不是依赖 agent
-自动发现 skill。MCP tools 会复用同一套 audit/export/plan/apply/diff/check
-逻辑，并要求所有路径位于声明的工作区 root 内。
+跨工作区使用时，推荐把 `html-docx-mcp` 加入 `PATH`，再通过 MCP JSON 暴露 tools，
+而不是依赖 agent 自动发现 skill。MCP tools 会复用同一套
+audit/export/plan/apply/diff/check 逻辑，并要求所有路径位于声明的工作区 root 内。
 
 Agent 可以编辑：
 

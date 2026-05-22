@@ -46,7 +46,7 @@ controlled edits, and agent workflows.
 
 Current local validation at the time of this release:
 
-- `69` unit tests passing.
+- `70` unit tests passing.
 - Built-in pressure fixture round-trip: `6/6` byte-identical.
 - Real sample round-trip: byte-identical and semantically identical.
 - MCP stdio smoke test passing.
@@ -83,55 +83,55 @@ python -m html_docx batch-check pressure-fixtures --work pressure-work --out pre
 
 These commands do not need network access and do not modify global Python state.
 
-### Install Once For All Workspaces
+### Put The Commands On PATH
 
-```powershell
-.\scripts\install-hdocx.ps1 -All -AddToUserPath
-```
-
-This installs the CLI, installs the local stdio MCP server command, and adds
-MCP configuration for Codex and Claude Code when their CLIs/config locations are
-available. It writes to user-level locations only:
+H-DOCX does not edit your MCP client configuration automatically. Install the
+package into a Python environment you control, then add that environment's
+command directory to `PATH` so every workspace can run:
 
 ```text
-%USERPROFILE%\.hdocx\                 # isolated CLI venv and command shims
-%CODEX_HOME%\config.toml              # Codex MCP server block, default %USERPROFILE%\.codex\config.toml
-Claude Code user MCP config           # via claude mcp add --scope user
+html-docx
+html-docx-mcp
 ```
 
-Open a new terminal after using `-AddToUserPath`, then verify:
+For example, after installing into a venv, add its `Scripts` directory on
+Windows:
+
+```powershell
+$env:PATH = "C:\Tools\hdocx\.venv\Scripts;$env:PATH"
+```
+
+Use your own install location. For a persistent setup, add the same command
+directory to your user `PATH` through your shell profile or Windows environment
+variable settings.
+
+Open a new terminal, then verify:
 
 ```powershell
 html-docx doctor
 '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' | html-docx-mcp
 ```
 
-Preview the install without writing files:
+Use this MCP JSON in clients that accept the common `mcpServers` shape:
 
-```powershell
-.\scripts\install-hdocx.ps1 -All -DryRun
+```json
+{
+  "mcpServers": {
+    "hdocx": {
+      "command": "html-docx-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
-After installation, a diagnostic report is written to:
+If your MCP client uses a different outer key, keep the `hdocx` server object
+and adapt only the wrapper. Agents should pass each tool's `root` argument for
+the active workspace. `HDOCX_MCP_ROOT` is available only as an optional fallback
+when a client cannot pass `root`; when omitted, the server falls back to
+`CLAUDE_PROJECT_DIR` and then its current directory.
 
-```text
-%USERPROFILE%\.hdocx\mcp-install-report.json
-```
-
-Install only the CLI/MCP command without configuring clients:
-
-```powershell
-.\scripts\install-hdocx.ps1 -Tool -AddToUserPath
-```
-
-Configure only Codex or Claude Code after the command already exists:
-
-```powershell
-.\scripts\install-hdocx.ps1 -Codex
-.\scripts\install-hdocx.ps1 -Claude
-```
-
-Restart Codex or Claude Code after changing MCP configuration.
+Restart your MCP client after changing its configuration.
 
 ## Editing Workflow
 
@@ -341,23 +341,41 @@ The repository exposes the DOCX workflow as a local stdio MCP server:
 html-docx-mcp
 ```
 
-Codex configuration is written as a managed block in `%CODEX_HOME%\config.toml`:
+Add `html-docx-mcp` to `PATH`, then configure your MCP client with JSON:
 
-```toml
-[mcp_servers.hdocx]
-command = "C:\\Users\\YOU\\.hdocx\\bin\\html-docx-mcp.cmd"
-args = []
-```
-
-Claude Code can be configured with:
-
-```powershell
-claude mcp add --transport stdio --scope user hdocx -- "C:\Users\YOU\.hdocx\bin\html-docx-mcp.cmd"
+```json
+{
+  "mcpServers": {
+    "hdocx": {
+      "command": "html-docx-mcp",
+      "args": []
+    }
+  }
+}
 ```
 
 The MCP server provides tools such as `hdocx_audit`, `hdocx_export`,
 `hdocx_plan`, `hdocx_apply`, `hdocx_diff`, `hdocx_check`,
-`hdocx_batch_check`, `hdocx_inspect`, and `hdocx_render_check`.
+`hdocx_batch_check`, `hdocx_inspect`, `hdocx_render_check`, and
+`hdocx_guidance`.
+
+It also exposes agent-facing resources and prompts:
+
+```text
+hdocx://guide/workflow
+hdocx://guide/writing-format
+hdocx://guide/hcss
+hdocx://guide/acceptance
+hdocx://guide/edge-cases
+
+hdocx_safe_edit
+hdocx_format_change
+hdocx_roundtrip_check
+```
+
+Agents should read the relevant resources before editing. Clients that do not
+surface MCP resources or prompts can call `hdocx_guidance` to retrieve the same
+authoring rules through a normal tool response.
 
 Every file-oriented tool accepts an optional `root` argument. All file paths must
 resolve inside that root. If `root` is omitted, the server uses
@@ -431,7 +449,6 @@ Word features are ordinary HTML.
 ```text
 src/html_docx/                  # CLI and library implementation
 tests/                          # unit and round-trip tests
-scripts/install-hdocx.ps1       # user-level CLI and MCP installer
 AGENTS.md                       # repository-level agent rules
 CLAUDE.md                       # Claude Code entry point
 USAGE_AND_PRINCIPLES.md         # full usage and design explanation

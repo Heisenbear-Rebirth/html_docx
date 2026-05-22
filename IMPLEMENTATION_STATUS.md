@@ -180,7 +180,7 @@ Inspection supports `node`, `style`, `list`, `table`, and `image`.
 Current automated tests:
 
 ```text
-69 tests passing
+70 tests passing
 ```
 
 Coverage includes:

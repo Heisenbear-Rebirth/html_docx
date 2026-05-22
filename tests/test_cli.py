@@ -291,8 +291,72 @@ class CLITests(unittest.TestCase):
         tool_names = {tool["name"] for tool in responses[1]["result"]["tools"]}
         self.assertIn("hdocx_check", tool_names)
         self.assertIn("hdocx_export", tool_names)
+        self.assertIn("hdocx_guidance", tool_names)
         self.assertFalse(responses[2]["result"]["isError"])
         self.assertTrue(responses[2]["result"]["structuredContent"]["ok"])
+
+    def test_mcp_exposes_guidance_resources_prompts_and_tool(self) -> None:
+        from html_docx.mcp_server import HDocxMcpServer
+
+        server = HDocxMcpServer()
+        resources = server.handle_message({"jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {}})
+        self.assertIsNotNone(resources)
+        resource_items = resources["result"]["resources"]
+        resource_uris = {item["uri"] for item in resource_items}
+        self.assertIn("hdocx://guide/writing-format", resource_uris)
+        self.assertIn("hdocx://guide/hcss", resource_uris)
+
+        read = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "resources/read",
+                "params": {"uri": "hdocx://guide/writing-format"},
+            }
+        )
+        self.assertIsNotNone(read)
+        text = read["result"]["contents"][0]["text"]
+        self.assertIn("document.html", text)
+        self.assertIn("agent.edits.hcss", text)
+
+        prompts = server.handle_message({"jsonrpc": "2.0", "id": 3, "method": "prompts/list", "params": {}})
+        self.assertIsNotNone(prompts)
+        prompt_names = {item["name"] for item in prompts["result"]["prompts"]}
+        self.assertIn("hdocx_safe_edit", prompt_names)
+        self.assertIn("hdocx_format_change", prompt_names)
+
+        prompt = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "prompts/get",
+                "params": {
+                    "name": "hdocx_format_change",
+                    "arguments": {
+                        "root": str(TMP),
+                        "input_docx": "input.docx",
+                        "goal": "Set body text to 12 pt.",
+                    },
+                },
+            }
+        )
+        self.assertIsNotNone(prompt)
+        prompt_text = prompt["result"]["messages"][0]["content"]["text"]
+        self.assertIn("hdocx_plan", prompt_text)
+        self.assertIn("H-CSS", prompt_text)
+
+        guidance = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "hdocx_guidance", "arguments": {"topic": "hcss"}},
+            }
+        )
+        self.assertIsNotNone(guidance)
+        payload = guidance["result"]["structuredContent"]
+        self.assertTrue(payload["ok"])
+        self.assertIn("@hdocx-set", payload["guidance"])
 
     def test_mcp_rejects_paths_outside_root(self) -> None:
         from html_docx.mcp_server import HDocxMcpServer

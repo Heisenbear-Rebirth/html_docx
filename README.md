@@ -21,7 +21,68 @@ Unsafe edits must fail.
 For the full usage and design explanation, read
 [`USAGE_AND_PRINCIPLES.md`](USAGE_AND_PRINCIPLES.md).
 
-## Using With Claude Code
+## Quick Start
+
+### 1. Clone
+
+```powershell
+git clone https://github.com/Heisenbear-Rebirth/html_docx.git
+cd html_docx
+```
+
+### 2. Verify The Tool
+
+From the repository root:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m html_docx doctor
+python -m unittest discover -s tests
+python -m html_docx generate-fixtures --out pressure-fixtures --force --report pressure-fixtures.json
+python -m html_docx batch-check pressure-fixtures --work pressure-work --out pressure-out --force --report pressure.json
+```
+
+These commands require no network and no global Python installation changes.
+
+### 3. Use With Codex
+
+Open Codex Desktop or Codex CLI in the repository root. Codex should treat
+`AGENTS.md` as the canonical repository instruction file.
+
+For this repository, no extra Codex configuration is required:
+
+```text
+AGENTS.md
+```
+
+The reusable Codex skill package is also checked in here:
+
+```text
+skills/hdocx-agent/SKILL.md
+```
+
+Recommended first prompt in Codex:
+
+```text
+Read AGENTS.md and use skills/hdocx-agent/SKILL.md as the workflow for strict DOCX editing. Then run the verification commands from README Quick Start.
+```
+
+For a DOCX task, ask Codex naturally:
+
+```text
+Use H-DOCX to audit input.docx, export it to a work.hdocx bundle, make only the requested edits, apply it back to DOCX, and prove the diff contains only intended changes.
+```
+
+Optional global Codex skill installation:
+
+- Copy `skills/hdocx-agent/` into your Codex skills directory as
+  `hdocx-agent`.
+- Only do this when you intentionally want the skill available outside this
+  repository.
+- This changes user-level Codex configuration, so this project does not do it
+  automatically.
+
+### 4. Use With Claude Code
 
 This repository is already configured for Claude Code.
 
@@ -38,11 +99,9 @@ The project-level Claude Code skill is checked in at:
 .claude/skills/hdocx-agent/SKILL.md
 ```
 
-To use it in this repository:
+Start Claude Code from the repository root:
 
 ```powershell
-git clone https://github.com/Heisenbear-Rebirth/html_docx.git
-cd html_docx
 claude
 ```
 
@@ -52,45 +111,40 @@ Inside Claude Code, invoke the skill directly when you want strict DOCX editing:
 /hdocx-agent
 ```
 
-You can also ask naturally, for example:
+You can also ask naturally:
 
 ```text
-Use H-DOCX to audit docx/test.docx and prove whether it round-trips byte-identically.
+Use H-DOCX to audit input.docx and prove whether it round-trips byte-identically.
 ```
 
-Claude Code should load the skill automatically for relevant DOCX/H-DOCX tasks,
-because the skill description names DOCX inspection, editing, round-trip,
-validation, pressure testing, and layout preservation.
+Claude Code should load the project skill automatically for relevant
+DOCX/H-DOCX tasks, because the skill description names DOCX inspection,
+editing, round-trip, validation, pressure testing, and layout preservation.
 
-For a clean first check inside Claude Code, ask it to run:
+### 5. Edit A DOCX
 
-```powershell
-$env:PYTHONPATH = "src"
-python -m html_docx doctor
-python -m unittest discover -s tests
-python -m html_docx generate-fixtures --out pressure-fixtures --force --report pressure-fixtures.json
-python -m html_docx batch-check pressure-fixtures --work pressure-work --out pressure-out --force --report pressure.json
-```
-
-For a real DOCX edit, the Claude Code workflow is:
+Use the same core workflow in Codex, Claude Code, or a normal terminal:
 
 ```powershell
 $env:PYTHONPATH = "src"
 python -m html_docx audit input.docx --report audit.json
 python -m html_docx export input.docx --out work.hdocx --force
 python -m html_docx inspect work.hdocx --kind node --id p-000001
-# Claude edits work.hdocx/document.html or work.hdocx/agent.edits.hcss
+# The agent edits work.hdocx/document.html or work.hdocx/agent.edits.hcss
 python -m html_docx plan work.hdocx --report plan.json
 python -m html_docx apply work.hdocx --out output.docx --report apply.json
 python -m html_docx diff input.docx output.docx --report diff.json
 ```
 
-To reuse this tool from another Claude Code workspace, prefer one of these
-workspace-local approaches:
+### 6. Reuse From Another Workspace
 
-- Clone or vendor this repository inside that workspace and run Claude Code from
+Prefer workspace-local approaches:
+
+- Clone or vendor this repository inside that workspace and run the agent from
   the repository root when editing DOCX files.
-- Add this repository as an approved extra directory with Claude Code's
+- For Codex, either open this repository as the workspace or explicitly point
+  the agent to `AGENTS.md` and `skills/hdocx-agent/SKILL.md`.
+- For Claude Code, add this repository as an approved extra directory with
   `--add-dir` only when you intentionally want Claude Code to read the H-DOCX
   project skill from this checkout.
 - Install the built wheel into that workspace's own `.venv`; do not install it
@@ -99,7 +153,7 @@ workspace-local approaches:
 Do not put private preferences or machine-specific permissions in tracked files.
 Use `CLAUDE.local.md` or `.claude/settings.local.json`; both are ignored by git.
 
-Claude Code references:
+References:
 
 - [CLAUDE.md project memory](https://code.claude.com/docs/en/memory)
 - [Claude Code skills](https://code.claude.com/docs/en/skills)

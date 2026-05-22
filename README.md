@@ -87,7 +87,7 @@ These commands do not need network access and do not modify global Python state.
 To make the CLI and agent skills available outside this repository:
 
 ```powershell
-.\scripts\install-hdocx.ps1 -All -AddToUserPath
+.\scripts\install-hdocx.ps1 -All -AddToUserPath -CodexFallbackAgent
 ```
 
 The installer writes to user-level locations only:
@@ -97,6 +97,12 @@ The installer writes to user-level locations only:
 %CODEX_HOME%\skills\hdocx-agent       # Codex skill, default %USERPROFILE%\.codex\skills\hdocx-agent
 %USERPROFILE%\.claude\skills\hdocx-agent
 ```
+
+`-CodexFallbackAgent` also adds a small marked block to
+`%CODEX_HOME%\AGENTS.md` that points Codex to the installed skill and CLI. The
+installer backs up the previous file before adding this block. This fallback is
+useful when a Codex build does not automatically enumerate user-installed
+skills.
 
 Open a new terminal after using `-AddToUserPath`, then verify:
 
@@ -108,6 +114,12 @@ Preview the install without writing files:
 
 ```powershell
 .\scripts\install-hdocx.ps1 -All -DryRun
+```
+
+After installation, a diagnostic report is written to:
+
+```text
+%USERPROFILE%\.hdocx\install-report.json
 ```
 
 Install only the agent skills:

@@ -5,6 +5,7 @@ param(
   [switch]$Claude,
   [switch]$Force,
   [switch]$AddToUserPath,
+  [switch]$CodexFallbackAgent,
   [switch]$DryRun,
   [string]$ToolHome,
   [string]$CodexHome,
@@ -124,7 +125,148 @@ exit $LASTEXITCODE
   }
 }
 
-if (-not ($All -or $Tool -or $Codex -or $Claude)) {
+function Test-Skill($Path) {
+  $skillFile = Join-Path $Path "SKILL.md"
+  if (-not (Test-Path -LiteralPath $skillFile)) {
+    return @{
+      ok = $false
+      path = $Path
+      reason = "missing SKILL.md"
+    }
+  }
+
+  $content = Get-Content -LiteralPath $skillFile -Raw
+  if ($content -notmatch "(?ms)^---\s*\r?\n.*?^name:\s*hdocx-agent\s*$.*?^description:\s*.+?\r?\n---") {
+    return @{
+      ok = $false
+      path = $Path
+      reason = "invalid or missing YAML frontmatter"
+    }
+  }
+
+  return @{
+    ok = $true
+    path = $Path
+    reason = $null
+  }
+}
+
+function Update-CodexFallbackAgent($ResolvedCodexHome, $ResolvedToolHome) {
+  $agentFile = Join-Path $ResolvedCodexHome "AGENTS.md"
+  $skillPath = Join-Path $ResolvedCodexHome "skills\hdocx-agent\SKILL.md"
+  $cliPath = Join-Path $ResolvedToolHome "bin\html-docx.cmd"
+  $startMarker = "<!-- hdocx-agent-install:start -->"
+  $endMarker = "<!-- hdocx-agent-install:end -->"
+  $block = @"
+$startMarker
+
+## H-DOCX Agent Fallback
+
+When a task asks to inspect, edit, round-trip, validate, or pressure-test DOCX
+files through H-DOCX/html_docx, use the installed H-DOCX skill and CLI:
+
+- Skill: ``$skillPath``
+- CLI: ``$cliPath``
+
+If the Codex skill list does not show `hdocx-agent`, manually read the skill
+file above and follow it as the workflow. Keep all task files inside the active
+workspace unless the user explicitly approves otherwise.
+
+$endMarker
+"@
+
+  Ensure-Directory $ResolvedCodexHome
+
+  if (Test-Path -LiteralPath $agentFile) {
+    $existing = Get-Content -LiteralPath $agentFile -Raw -ErrorAction Stop
+  } else {
+    $existing = ""
+  }
+
+  $pattern = "(?s)\r?\n?$([regex]::Escape($startMarker)).*?$([regex]::Escape($endMarker))\r?\n?"
+  $clean = [regex]::Replace($existing, $pattern, "`r`n")
+  $newContent = ($clean.TrimEnd() + "`r`n`r`n" + $block.TrimEnd() + "`r`n")
+
+  if ($DryRun) {
+    Write-Step "Would update Codex fallback AGENTS.md: $agentFile"
+    return
+  }
+
+  if ((Test-Path -LiteralPath $agentFile) -and ($existing -notmatch [regex]::Escape($startMarker))) {
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backup = "$agentFile.hdocx-backup-$stamp"
+    Copy-Item -LiteralPath $agentFile -Destination $backup -Force
+    Write-Step "Backed up Codex AGENTS.md: $backup"
+  }
+
+  Set-Content -LiteralPath $agentFile -Value $newContent -Encoding UTF8
+  Write-Step "Updated Codex fallback AGENTS.md: $agentFile"
+}
+
+function Write-InstallReport($ResolvedToolHome, $ResolvedCodexHome, $ResolvedClaudeHome) {
+  $binPath = Join-Path $ResolvedToolHome "bin"
+  $htmlDocxCmd = Join-Path $binPath "html-docx.cmd"
+  $codexSkill = Join-Path $ResolvedCodexHome "skills\hdocx-agent"
+  $claudeSkill = Join-Path $ResolvedClaudeHome "skills\hdocx-agent"
+  $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  $pathContainsBin = $false
+  if ($userPath) {
+    $pathContainsBin = @(($userPath -split ";") | Where-Object {
+      $_.TrimEnd("\") -ieq $binPath.TrimEnd("\")
+    }).Count -gt 0
+  }
+
+  $cliDoctor = @{
+    ok = $false
+    exitCode = $null
+    output = $null
+  }
+
+  if ((Test-Path -LiteralPath $htmlDocxCmd) -and (-not $DryRun)) {
+    $doctorOutput = & $htmlDocxCmd doctor 2>&1
+    $cliDoctor.exitCode = $LASTEXITCODE
+    $cliDoctor.ok = ($LASTEXITCODE -eq 0)
+    $cliDoctor.output = ($doctorOutput | Out-String).Trim()
+  }
+
+  $report = [ordered]@{
+    generatedAt = (Get-Date).ToString("o")
+    toolHome = $ResolvedToolHome
+    cli = [ordered]@{
+      binPath = $binPath
+      command = $htmlDocxCmd
+      exists = Test-Path -LiteralPath $htmlDocxCmd
+      userPathContainsBin = $pathContainsBin
+      doctor = $cliDoctor
+    }
+    codex = [ordered]@{
+      home = $ResolvedCodexHome
+      skill = Test-Skill $codexSkill
+      fallbackAgent = Join-Path $ResolvedCodexHome "AGENTS.md"
+      fallbackAgentContainsHdocx = if (Test-Path -LiteralPath (Join-Path $ResolvedCodexHome "AGENTS.md")) {
+        ((Get-Content -LiteralPath (Join-Path $ResolvedCodexHome "AGENTS.md") -Raw) -match "hdocx-agent-install:start")
+      } else {
+        $false
+      }
+    }
+    claude = [ordered]@{
+      home = $ResolvedClaudeHome
+      skill = Test-Skill $claudeSkill
+    }
+  }
+
+  Ensure-Directory $ResolvedToolHome
+  $reportPath = Join-Path $ResolvedToolHome "install-report.json"
+  if ($DryRun) {
+    Write-Step "Would write install report: $reportPath"
+    Write-Host ($report | ConvertTo-Json -Depth 8)
+  } else {
+    $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding UTF8
+    Write-Step "Wrote install report: $reportPath"
+  }
+}
+
+if (-not ($All -or $Tool -or $Codex -or $Claude -or $CodexFallbackAgent)) {
   $All = $true
 }
 
@@ -171,6 +313,10 @@ if ($Codex) {
   }
 }
 
+if ($CodexFallbackAgent) {
+  Update-CodexFallbackAgent $CodexHome $ToolHome
+}
+
 if ($Claude) {
   $claudeSource = Join-Path $repoRoot ".claude\skills\hdocx-agent"
   $claudeDest = Join-Path $ClaudeHome "skills\hdocx-agent"
@@ -181,6 +327,8 @@ if ($Claude) {
     Write-Step "Installed Claude Code skill: $claudeDest"
   }
 }
+
+Write-InstallReport $ToolHome $CodexHome $ClaudeHome
 
 Write-Step "Done."
 if ($Codex) {

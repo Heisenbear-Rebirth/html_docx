@@ -85,7 +85,7 @@ python -m html_docx batch-check pressure-fixtures --work pressure-work --out pre
 根目录运行：
 
 ```powershell
-.\scripts\install-hdocx.ps1 -All -AddToUserPath
+.\scripts\install-hdocx.ps1 -All -AddToUserPath -CodexFallbackAgent
 ```
 
 安装脚本只写入用户级位置：
@@ -95,6 +95,10 @@ python -m html_docx batch-check pressure-fixtures --work pressure-work --out pre
 %CODEX_HOME%\skills\hdocx-agent       # Codex skill，默认 %USERPROFILE%\.codex\skills\hdocx-agent
 %USERPROFILE%\.claude\skills\hdocx-agent
 ```
+
+`-CodexFallbackAgent` 还会向 `%CODEX_HOME%\AGENTS.md` 写入一小段带标记的
+fallback 规则，指向已安装的 skill 和 CLI。安装器会先备份原文件。这个 fallback
+用于处理某些 Codex 版本没有自动枚举用户级 skill 的情况。
 
 使用 `-AddToUserPath` 后，请打开新终端再验证：
 
@@ -106,6 +110,12 @@ html-docx doctor
 
 ```powershell
 .\scripts\install-hdocx.ps1 -All -DryRun
+```
+
+安装后会生成诊断报告：
+
+```text
+%USERPROFILE%\.hdocx\install-report.json
 ```
 
 只安装 Agent skills，不安装 CLI：

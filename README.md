@@ -1,38 +1,76 @@
 # html_docx
 
-Agent-friendly reversible DOCX editing through H-DOCX bundles.
+[中文 README](README.zh-CN.md)
 
-The project goal is a strict reversible workflow:
+Agent-oriented, reversible DOCX editing through H-DOCX bundles.
+
+`html_docx` lets coding agents such as Codex and Claude Code inspect, edit, and
+validate Word documents without turning DOCX into lossy browser HTML. It exposes
+the parts agents should edit as an HTML-like projection and keeps the original
+OOXML package as the source of truth.
 
 ```text
 DOCX <-> H-DOCX bundle <-> DOCX
 ```
 
-`document.html` is the agent-editable projection. `agent.edits.hcss` is a small H-DOCX edit DSL for batch formatting and controlled structural operations. The original DOCX package, OOXML parts, and `manifest.json` remain the source of truth.
+The core contract is deliberately strict:
 
-Core rule:
+- Unedited round-trips must be byte-identical.
+- Edited round-trips must preserve every untouched OOXML part exactly.
+- Unsupported or unsafe edits must fail with a report instead of guessing.
+- Validation reports, not visual inspection alone, are the source of truth.
 
-```text
-Editable content must patch exactly.
-Non-editable content must be preserved exactly.
-Unsafe edits must fail.
-```
+## Why H-DOCX
 
-For the full usage and design explanation, read
-[`USAGE_AND_PRINCIPLES.md`](USAGE_AND_PRINCIPLES.md).
+Normal DOCX-to-HTML conversion is useful for display, but it is not enough for
+agentic editing. Academic and professional Word documents contain styles,
+numbering, footnotes, endnotes, headers, fields, equations, comments, revisions,
+relationships, media, package metadata, and other OOXML structures that ordinary
+HTML cannot represent without loss.
+
+H-DOCX takes a different approach:
+
+- Project editable content into `document.html`.
+- Express formatting and structural operations in `agent.edits.hcss`.
+- Preserve the original DOCX, raw package parts, relationships, and metadata.
+- Patch only controlled fragments back into the original package.
+- Diff and audit the result before declaring success.
+
+This makes the format practical for agents: they can read and edit familiar
+HTML-like files, while the tool enforces DOCX safety.
+
+## Status
+
+This is an early but usable implementation focused on strict reversibility,
+controlled edits, and agent workflows.
+
+Current local validation at the time of this release:
+
+- `66` unit tests passing.
+- Built-in pressure fixture round-trip: `6/6` byte-identical.
+- Real sample round-trip: byte-identical and semantically identical.
+- Optional render QA is supported when LibreOffice/soffice is available.
+
+## Requirements
+
+- Windows PowerShell for the bundled installer script.
+- Python `>=3.11`.
+- No Python runtime dependencies are required by the package itself.
+- Optional: LibreOffice/soffice on `PATH` for render-based QA.
+
+The project is designed to avoid global Python package installation. Use a local
+workspace `.venv`, or the user-level isolated installer described below.
 
 ## Quick Start
 
-### 1. Clone
+### Clone
 
 ```powershell
 git clone https://github.com/Heisenbear-Rebirth/html_docx.git
 cd html_docx
 ```
 
-### 2. Verify The Tool
-
-From the repository root:
+### Verify From Source
 
 ```powershell
 $env:PYTHONPATH = "src"
@@ -42,239 +80,138 @@ python -m html_docx generate-fixtures --out pressure-fixtures --force --report p
 python -m html_docx batch-check pressure-fixtures --work pressure-work --out pressure-out --force --report pressure.json
 ```
 
-These commands require no network and no global Python installation changes.
+These commands do not need network access and do not modify global Python state.
 
-### 3. Install Once For All Workspaces
+### Install Once For All Workspaces
 
-If you want `html-docx`, the Codex skill, and the Claude Code skill available
-outside this repository, run the installer from the repository root:
+To make the CLI and agent skills available outside this repository:
 
 ```powershell
 .\scripts\install-hdocx.ps1 -All -AddToUserPath
 ```
 
-This writes only to user-level locations:
+The installer writes to user-level locations only:
 
 ```text
-%USERPROFILE%\.hdocx\                 # isolated CLI venv and shims
+%USERPROFILE%\.hdocx\                 # isolated CLI venv and command shims
 %CODEX_HOME%\skills\hdocx-agent       # Codex skill, default %USERPROFILE%\.codex\skills\hdocx-agent
 %USERPROFILE%\.claude\skills\hdocx-agent
 ```
 
-Open a new terminal after `-AddToUserPath`, then verify from any directory:
+Open a new terminal after using `-AddToUserPath`, then verify:
 
 ```powershell
 html-docx doctor
 ```
 
-To preview the install without writing files:
+Preview the install without writing files:
 
 ```powershell
 .\scripts\install-hdocx.ps1 -All -DryRun
 ```
 
-To install only the agent skills and leave the CLI alone:
+Install only the agent skills:
 
 ```powershell
 .\scripts\install-hdocx.ps1 -Codex -Claude
 ```
 
-Use `-Force` to replace an existing installed skill. Restart Codex and Claude
-Code after installing skills so they discover the new user-level workflow.
+Use `-Force` to replace an existing installed skill. Restart Codex or Claude
+Code after installing user-level skills.
 
-### 4. Use With Codex
+## Editing Workflow
 
-Open Codex Desktop or Codex CLI in the repository root. Codex should treat
-`AGENTS.md` as the canonical repository instruction file.
+### No-Edit Reversibility Check
 
-For this repository, no extra Codex configuration is required:
-
-```text
-AGENTS.md
-```
-
-The reusable Codex skill package is also checked in here:
-
-```text
-skills/hdocx-agent/SKILL.md
-```
-
-Recommended first prompt in Codex:
-
-```text
-Read AGENTS.md and use skills/hdocx-agent/SKILL.md as the workflow for strict DOCX editing. Then run the verification commands from README Quick Start.
-```
-
-For a DOCX task, ask Codex naturally:
-
-```text
-Use H-DOCX to audit input.docx, export it to a work.hdocx bundle, make only the requested edits, apply it back to DOCX, and prove the diff contains only intended changes.
-```
-
-Optional user-level Codex skill installation:
+Use this before trusting a new document family:
 
 ```powershell
-.\scripts\install-hdocx.ps1 -Codex
+html-docx check input.docx --work check.hdocx --out checked.docx --force --report check.json
 ```
 
-Only do this when you intentionally want the skill available outside this
-repository. This changes user-level Codex configuration, so this project does
-not do it automatically.
+Success means:
 
-After running `.\scripts\install-hdocx.ps1 -Codex`, the same skill is available
-outside this checkout from:
+- `ok: true`
+- `acceptance.byteIdentical: true`
+- `acceptance.semanticIdentical: true`
+- input and output SHA256 values match
 
-```text
-%CODEX_HOME%\skills\hdocx-agent
-```
+If SHA256 matches, the DOCX byte stream is identical. That is stronger evidence
+than render equality for an unedited round-trip.
 
-Then from any Codex workspace, ask:
-
-```text
-Use the hdocx-agent skill and html-docx CLI to edit this DOCX safely.
-```
-
-### 5. Use With Claude Code
-
-This repository is already configured for Claude Code.
-
-Claude Code reads `CLAUDE.md`, not `AGENTS.md`, so this repo keeps a small
-`CLAUDE.md` file that imports the canonical agent rules:
-
-```markdown
-@AGENTS.md
-```
-
-The project-level Claude Code skill is checked in at:
-
-```text
-.claude/skills/hdocx-agent/SKILL.md
-```
-
-Start Claude Code from the repository root:
-
-```powershell
-claude
-```
-
-Inside Claude Code, invoke the skill directly when you want strict DOCX editing:
-
-```text
-/hdocx-agent
-```
-
-You can also ask naturally:
-
-```text
-Use H-DOCX to audit input.docx and prove whether it round-trips byte-identically.
-```
-
-Claude Code should load the project skill automatically for relevant
-DOCX/H-DOCX tasks, because the skill description names DOCX inspection,
-editing, round-trip, validation, pressure testing, and layout preservation.
-
-After running `.\scripts\install-hdocx.ps1 -Claude`, the same skill is available
-outside this checkout from:
-
-```text
-%USERPROFILE%\.claude\skills\hdocx-agent
-```
-
-### 6. Edit A DOCX
-
-Use the same core workflow in Codex, Claude Code, or a normal terminal:
-
-```powershell
-$env:PYTHONPATH = "src"
-python -m html_docx audit input.docx --report audit.json
-python -m html_docx export input.docx --out work.hdocx --force
-python -m html_docx inspect work.hdocx --kind node --id p-000001
-# The agent edits work.hdocx/document.html or work.hdocx/agent.edits.hcss
-python -m html_docx plan work.hdocx --report plan.json
-python -m html_docx apply work.hdocx --out output.docx --report apply.json
-python -m html_docx diff input.docx output.docx --report diff.json
-```
-
-If you installed the CLI with `-AddToUserPath`, the same workflow can use
-`html-docx` directly:
+### Controlled Edit
 
 ```powershell
 html-docx audit input.docx --report audit.json
 html-docx export input.docx --out work.hdocx --force
+html-docx inspect work.hdocx --kind node --id p-000001
+
+# Edit work.hdocx/document.html or work.hdocx/agent.edits.hcss.
+
 html-docx plan work.hdocx --report plan.json
 html-docx apply work.hdocx --out output.docx --report apply.json
 html-docx diff input.docx output.docx --report diff.json
 ```
 
-### 7. Reuse From Another Workspace
-
-Prefer workspace-local approaches:
-
-- Best for general use: run `.\scripts\install-hdocx.ps1 -All -AddToUserPath`
-  once, then use `html-docx` plus the user-level Codex/Claude skills anywhere.
-- Best for strict workspace isolation: clone or vendor this repository inside
-  that workspace and run the agent from the repository root.
-- For Codex without user-level install, explicitly point the agent to
-  `AGENTS.md` and `skills/hdocx-agent/SKILL.md`.
-- For Claude Code without user-level install, add this repository as an
-  approved extra directory with `--add-dir` only when you intentionally want
-  Claude Code to read the H-DOCX project skill from this checkout.
-- For Python-only reuse, install the package into that workspace's own `.venv`;
-  do not install it globally.
-
-Do not put private preferences or machine-specific permissions in tracked files.
-Use `CLAUDE.local.md` or `.claude/settings.local.json`; both are ignored by git.
-
-References:
-
-- [CLAUDE.md project memory](https://code.claude.com/docs/en/memory)
-- [Claude Code skills](https://code.claude.com/docs/en/skills)
-
-## Current Capabilities
-
-- Byte-identical unmodified roundtrip.
-- H-DOCX export with original package, extracted parts, HTML projection, H-CSS file, and manifest.
-- Editable run text, run formatting, run split, paragraph formatting, table-cell text, headers, footnotes.
-- Protected fields, references, comments, revisions, equations, and complex structures.
-- Image alt text, image size, existing media replacement, and controlled new image insertion.
-- Numbering/list metadata projection, controlled numbering-level edits, new single-level or multi-level list creation, paragraph list assignment, and automatic creation of missing `word/numbering.xml`.
-- Existing style definition edits, new paragraph style creation, safe unused-style deletion, paragraph style assignment, style manifest indexing, and automatic creation of missing `word/styles.xml`.
-- Simple table row/column insertion and deletion for non-merged tables.
-- Controlled comment text edits and revision accept/reject actions.
-- Controlled whole-equation OMML replacement from bundle-local source files.
-- Package diff, semantic node diff, and fragment-level byte change ranges linked to H-DOCX node ids.
-- Single-file and directory-level acceptance checks.
-- Built-in synthetic pressure fixture generation.
-- DOCX advanced-object audit for customXml, charts, SmartArt, OLE, AlternateContent, fields, equations, revisions, comments, notes, headers/footers, and images.
-- Optional render check through LibreOffice/soffice when available.
-- Classified inspection for nodes, styles, lists, tables, and images.
-- Fragment-preserving patching for simple text and run-format edits.
-
-## CLI
-
-Run from the repository root:
+When running directly from source instead of an installed CLI, prefix commands
+with:
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m html_docx export input.docx --out work.hdocx
-python -m html_docx validate work.hdocx
-python -m html_docx plan work.hdocx --report plan.json
-python -m html_docx apply work.hdocx --out output.docx --report apply.json
-python -m html_docx diff input.docx output.docx --report diff.json
-python -m html_docx audit input.docx --report audit.json
-python -m html_docx inspect work.hdocx --kind node --id p-000001
-python -m html_docx inspect work.hdocx --kind style --id Normal
-python -m html_docx roundtrip input.docx --work work.hdocx --out roundtrip.docx --force
-python -m html_docx check input.docx --work check.hdocx --out checked.docx --force --report check.json
-python -m html_docx batch-check fixtures --work pressure-work --out pressure-out --force --report pressure.json
-python -m html_docx generate-fixtures --out pressure-fixtures --force --report pressure-fixtures.json
-python -m html_docx render-check input.docx --out render-out --force --allow-missing --report render.json
-python -m html_docx doctor
+python -m html_docx ...
 ```
+
+## H-DOCX Bundle Layout
+
+An exported bundle is a normal directory:
+
+```text
+work.hdocx/
+  manifest.json
+  document.html
+  agent.edits.hcss
+  styles.generated.css
+  audit.log.jsonl
+  original/
+    original.docx
+    entries.json
+  parts/
+    ...
+```
+
+Important rules:
+
+- Edit `document.html` only where content is projected as editable.
+- Edit `agent.edits.hcss` for supported formatting and structural operations.
+- Do not edit `manifest.json`.
+- Do not edit `original/original.docx`.
+- Do not edit protected placeholders.
+- Do not rewrite arbitrary OOXML under `parts/` unless a dedicated operation
+  explicitly supports that change.
+
+## CLI Reference
+
+| Command | Purpose |
+| --- | --- |
+| `doctor` | Report runtime capabilities and optional renderer availability. |
+| `audit` | Detect high-risk DOCX structures and preservation policies. |
+| `export` | Convert a DOCX into an H-DOCX bundle. |
+| `validate` | Validate an H-DOCX bundle before applying it. |
+| `inspect` | Inspect nodes, styles, lists, tables, or images by id. |
+| `plan` | Plan edits without writing a DOCX. |
+| `apply` | Apply a bundle back to DOCX. |
+| `diff` | Compare two DOCX packages with package, semantic, and fragment reports. |
+| `roundtrip` | Export and apply without edits. |
+| `check` | Run export/apply/diff acceptance for one DOCX. |
+| `batch-check` | Run `check` over a file or directory. |
+| `generate-fixtures` | Generate synthetic pressure DOCX fixtures. |
+| `render-check` | Optionally render DOCX through LibreOffice/soffice. |
 
 ## H-CSS Examples
 
-Batch paragraph formatting:
+H-CSS is a small project-specific edit language. It is not browser CSS.
+
+### Paragraph Formatting
 
 ```css
 @hdocx-set body {
@@ -286,10 +223,11 @@ Batch paragraph formatting:
 body {
   hdocx-align: center;
   hdocx-line-spacing: 1.5;
+  hdocx-first-line-indent: 2char;
 }
 ```
 
-Function selectors are available for common agent workflows:
+### Function Selectors
 
 ```css
 @hdocx-set body-style {
@@ -305,7 +243,18 @@ Function selectors are available for common agent workflows:
 }
 ```
 
-Insert a new image after a paragraph:
+### Run Formatting
+
+```css
+@hdocx-edit mode(run-formatting);
+
+#r-000001 {
+  hdocx-font-size: 12pt;
+  hdocx-bold: true;
+}
+```
+
+### Image Insertion
 
 ```css
 @hdocx-insert-image after(#p-000001) {
@@ -316,9 +265,7 @@ Insert a new image after a paragraph:
 }
 ```
 
-The target paragraph may be in the main document or another projected Word XML part such as a header, footer, footnote, or endnote.
-
-Insert a table row:
+### Table Row Insertion
 
 ```css
 @hdocx-insert-table-row after(#tr-000001) {
@@ -326,7 +273,7 @@ Insert a table row:
 }
 ```
 
-Create and apply a paragraph style:
+### Style Creation And Assignment
 
 ```css
 @hdocx-style AgentBody {
@@ -343,13 +290,7 @@ Create and apply a paragraph style:
 }
 ```
 
-Delete an unused style:
-
-```css
-@hdocx-delete-style(Heading1);
-```
-
-Patch a numbering level:
+### Numbering Definition Edit
 
 ```css
 @hdocx-set list-items {
@@ -365,18 +306,7 @@ list-items {
 }
 ```
 
-Create a two-level list:
-
-```css
-@hdocx-list AgentMulti {
-  hdocx-num-format: decimal;
-  hdocx-level-text: "%1.";
-  hdocx-level-1-num-format: lowerLetter;
-  hdocx-level-1-level-text: "%2)";
-}
-```
-
-Replace a protected equation with an OMML fragment stored inside the bundle:
+### Equation Replacement
 
 ```css
 @hdocx-edit mode(equation-omml);
@@ -386,26 +316,129 @@ Replace a protected equation with an OMML fragment stored inside the bundle:
 }
 ```
 
-## Tests
+## Agent Integration
+
+The repository includes both repository-level and user-installable agent
+instructions:
+
+```text
+AGENTS.md
+CLAUDE.md
+skills/hdocx-agent/SKILL.md
+.claude/skills/hdocx-agent/SKILL.md
+```
+
+For normal use, run the installer once and let the agent load the user-level
+skill from its standard skill directory. For strict workspace isolation, keep
+the repository cloned inside the workspace and point the agent to the repository
+rules and skill files.
+
+Agent-facing policy:
+
+- Inspect before broad edits.
+- Prefer ids, named sets, and narrow selectors.
+- Treat advanced structures as protected unless a dedicated mode supports the
+  requested operation.
+- Always run `plan`, `apply`, and `diff` before claiming success.
+
+## Validation And QA
+
+Use validation according to the risk of the task:
+
+- Source changes: `python -m unittest discover -s tests`
+- New or unknown DOCX: `html-docx audit` and `html-docx check`
+- Edited DOCX: `html-docx apply` followed by `html-docx diff`
+- Conversion logic changes: `generate-fixtures` followed by `batch-check`
+- Layout-sensitive edited output: `render-check` when LibreOffice/soffice is
+  available
+
+`render-check` is optional because it depends on an external renderer. A
+`renderer-missing` report means the renderer was not available; it does not
+invalidate byte-identical no-edit checks.
+
+## Supported Editing Surface
+
+Currently supported areas include:
+
+- Editable run text.
+- Run formatting and run split operations.
+- Paragraph formatting.
+- Paragraph style assignment, style creation, and safe unused-style deletion.
+- Numbering/list metadata projection and controlled numbering-level edits.
+- New single-level and multi-level list creation.
+- Table-cell text and simple non-merged table row/column operations.
+- Headers, footnotes, and endnotes as projected secondary parts.
+- Image alt text, size metadata, controlled media replacement, and image
+  insertion.
+- Controlled comment text edits.
+- Revision accept/reject actions.
+- Whole-equation OMML replacement from bundle-local files.
+- Package, semantic, and fragment-level diffs.
+
+## Preservation Policy
+
+High-risk structures are preserved and protected unless a dedicated operation
+supports the exact requested change:
+
+- custom XML
+- charts
+- SmartArt
+- OLE
+- AlternateContent
+- fields
+- equations
+- comments
+- revisions
+- text boxes
+- VML
+
+This is intentional. Strict reversibility is more important than pretending all
+Word features are ordinary HTML.
+
+## Repository Layout
+
+```text
+src/html_docx/                  # CLI and library implementation
+tests/                          # unit and round-trip tests
+scripts/install-hdocx.ps1       # user-level CLI and skill installer
+skills/hdocx-agent/             # Codex skill package
+.claude/skills/hdocx-agent/     # Claude Code project skill
+AGENTS.md                       # repository-level agent rules
+CLAUDE.md                       # Claude Code entry point
+USAGE_AND_PRINCIPLES.md         # full usage and design explanation
+```
+
+## Development
+
+Run tests:
 
 ```powershell
+$env:PYTHONPATH = "src"
 python -m unittest discover -s tests
 ```
 
-Current local status is tracked in `IMPLEMENTATION_STATUS.md`.
+Build a wheel in a local environment:
 
-## Design Documents
+```powershell
+.\.venv\Scripts\python.exe -m pip wheel . --no-deps --no-build-isolation -w dist
+```
 
-- `FUNCTIONAL_SPEC.md`
-- `HDOCX_HTML_DESIGN.md`
-- `EDITING_EDGE_CASES.md`
-- `SELECTOR_AND_REUSE_DESIGN.md`
-- `SELECTOR_EDGE_CASES_AND_GUARDS.md`
-- `EDGE_CASE_TEST_MATRIX.md`
-- `SOFTWARE_ARCHITECTURE.md`
-- `GLOBAL_DELIVERY_PLAN.md`
-- `COMPLETION_PLAN.md`
-- `IMPLEMENTATION_STATUS.md`
-- `AGENT_GUIDE.md`
-- `RELEASE_CHECKLIST.md`
-- `PRESSURE_FIXTURES.md`
+Generated fixtures, render outputs, temporary bundles, local DOCX samples, and
+local virtual environments are ignored by git.
+
+## Documentation Map
+
+- `USAGE_AND_PRINCIPLES.md`: usage and implementation principles.
+- `FUNCTIONAL_SPEC.md`: functional boundary.
+- `HDOCX_HTML_DESIGN.md`: H-DOCX/HTML representation design.
+- `SELECTOR_AND_REUSE_DESIGN.md`: selector and reuse model.
+- `SELECTOR_EDGE_CASES_AND_GUARDS.md`: selector edge cases and safeguards.
+- `EDITING_EDGE_CASES.md`: editing edge cases.
+- `EDGE_CASE_TEST_MATRIX.md`: edge and pressure test matrix.
+- `SOFTWARE_ARCHITECTURE.md`: architecture.
+- `GLOBAL_DELIVERY_PLAN.md`: delivery plan.
+- `COMPLETION_PLAN.md`: completion gates.
+- `IMPLEMENTATION_STATUS.md`: implementation status.
+- `AGENT_GUIDE.md`: detailed agent workflow.
+- `PRESSURE_FIXTURES.md`: pressure fixture coverage.
+- `RELEASE_CHECKLIST.md`: release verification checklist.

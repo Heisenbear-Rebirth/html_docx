@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -14,6 +15,7 @@ from .hdocx import (
     audit_docx,
     batch_check_docx,
     check_docx,
+    create_docx,
     diff_docx,
     doctor_report,
     export_docx,
@@ -69,6 +71,7 @@ class HDocxMcpServer:
         self.tools = _build_tools()
         self.resources = _build_resources()
         self.prompts = _build_prompts()
+        self._tool_lock = threading.Lock()
 
     def run(self) -> int:
         for raw_line in sys.stdin:
@@ -181,6 +184,19 @@ class HDocxMcpServer:
         if not isinstance(arguments, dict):
             return _error_response(request_id, -32602, "Tool arguments must be an object", {"tool": tool_name})
 
+        if not self._tool_lock.acquire(blocking=False):
+            return _tool_response(
+                request_id,
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "MCP_SERVER_BUSY",
+                        "severity": "error",
+                        "message": "html-docx-mcp is already running another tool call; retry this call sequentially.",
+                    },
+                },
+                is_error=True,
+            )
         try:
             payload = tool.handler(arguments)
             return _tool_response(request_id, payload, is_error=not bool(payload.get("ok", True)))
@@ -203,6 +219,8 @@ class HDocxMcpServer:
                 },
                 is_error=True,
             )
+        finally:
+            self._tool_lock.release()
 
     def _read_resource(self, request_id: Any, params: dict[str, Any]) -> dict[str, Any]:
         uri = params.get("uri")
@@ -266,6 +284,42 @@ def _build_tools() -> dict[str, Tool]:
                 }
             ),
             _guidance_tool,
+        ),
+        Tool(
+            "hdocx_create",
+            "Create a new canonical DOCX and optionally export it to an H-DOCX bundle.",
+            _schema(
+                required=["out"],
+                properties={
+                    "root": _string(ROOT_DESCRIPTION),
+                    "out": _string("Output DOCX path under root."),
+                    "title": _string("Optional document title."),
+                    "paragraphs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional body paragraphs. Defaults to one empty editable paragraph.",
+                    },
+                    "template": {
+                        "type": "string",
+                        "enum": ["blank"],
+                        "description": "Creation template. Defaults to blank.",
+                    },
+                    "force": _boolean("Replace an existing output DOCX and exported bundle."),
+                    "exportTo": _string("Optional H-DOCX bundle directory to export after creation."),
+                    "report": _string("Optional JSON report path under root."),
+                },
+            ),
+            lambda args: _with_report(
+                args,
+                create_docx(
+                    _path_arg(args, "out"),
+                    title=_optional_string_arg(args, "title"),
+                    paragraphs=_string_list_arg(args, "paragraphs"),
+                    template=_optional_string_arg(args, "template") or "blank",
+                    force=bool(args.get("force", False)),
+                    export_dir=_path_arg(args, "exportTo") if args.get("exportTo") else None,
+                ),
+            ),
         ),
         Tool(
             "hdocx_audit",
@@ -529,6 +583,18 @@ def _build_resources() -> dict[str, GuideResource]:
 def _build_prompts() -> dict[str, PromptTemplate]:
     prompts = [
         PromptTemplate(
+            "hdocx_create_docx",
+            "Create a new DOCX from the canonical H-DOCX blank template.",
+            [
+                _prompt_arg("root", "Workspace root for the new DOCX and optional bundle.", required=True),
+                _prompt_arg("out", "Output DOCX path relative to root.", required=True),
+                _prompt_arg("goal", "Requested document content or purpose.", required=True),
+                _prompt_arg("title", "Optional document title.", required=False),
+                _prompt_arg("work", "Optional H-DOCX bundle directory relative to root.", required=False),
+            ],
+            _create_docx_prompt,
+        ),
+        PromptTemplate(
             "hdocx_safe_edit",
             "Safely edit a DOCX through an H-DOCX bundle.",
             [
@@ -575,6 +641,12 @@ best-effort HTML converter.
 
 Required workflow for agents:
 
+For a new document, call `hdocx_create` first. It creates a canonical DOCX from
+the built-in blank template and can optionally export that new DOCX to an
+H-DOCX bundle for immediate editing.
+
+For an existing document:
+
 1. Run `hdocx_audit` on the source DOCX.
 2. Run `hdocx_export` to create a `.hdocx` bundle.
 3. Run `hdocx_inspect` before targeting styles, lists, tables, images, or
@@ -587,6 +659,10 @@ Required workflow for agents:
 
 For no-edit reversibility proof, use `hdocx_check` directly. A byte-identical
 SHA256 match is stronger than render equality for unedited round-trips.
+
+MCP tool calls should be serialized. If a client issues concurrent calls, the
+server returns a structured `MCP_SERVER_BUSY` error instead of allowing a
+second operation to interfere with the stdio transport.
 """
 
 
@@ -650,9 +726,73 @@ If a selector is allowed to match nothing, say so explicitly:
 }
 ```
 
+Selector support is intentionally small: ids, classes, exact attribute
+selectors, class+attribute compounds such as
+`.hdocx-r[data-hdocx-id="r-000001"]`, and the H-DOCX functions above. Comma
+grouping selectors are not supported; use `@hdocx-set` blocks instead.
+
 Do not use broad selectors when the user asked for a narrow change. Do not
-write normal CSS properties unless H-DOCX explicitly supports them. Always run
-`hdocx_plan` and inspect the resulting target set before applying.
+write normal CSS properties unless H-DOCX explicitly supports them.
+
+## Supported Formatting Declarations
+
+All declarations must use the `hdocx-` prefix. `hdocx_plan` reports the source
+line, selector matches, normalized value, OOXML mapping, support status, and
+patch ids.
+
+Run formatting, used with `@hdocx-edit mode(all-runs);`:
+
+| H-CSS declaration | Value | OOXML |
+| --- | --- | --- |
+| `hdocx-font-family` | quoted or bare font name | `w:rFonts @w:ascii` and `@w:hAnsi` |
+| `hdocx-eastAsia-font` or `hdocx-east-asia-font` | quoted or bare font name | `w:rFonts @w:eastAsia` |
+| `hdocx-ascii-font` | quoted or bare font name | `w:rFonts @w:ascii` |
+| `hdocx-hansi-font` | quoted or bare font name | `w:rFonts @w:hAnsi` |
+| `hdocx-cs-font` | quoted or bare font name | `w:rFonts @w:cs` |
+| `hdocx-font-size` | positive `pt`, such as `10.5pt` | `w:sz` half-points |
+| `hdocx-bold` | `true` or `false` | `w:b` |
+| `hdocx-italic` | `true` or `false` | `w:i` |
+| `hdocx-color` | `#RRGGBB` | `w:color @w:val` |
+
+Paragraph formatting, used with `@hdocx-edit mode(paragraph-formatting);`:
+
+| H-CSS declaration | Value | OOXML |
+| --- | --- | --- |
+| `hdocx-text-align` or `hdocx-align` | `left`, `center`, `right`, `justify`/`both` | `w:jc @w:val` |
+| `hdocx-first-line-indent` | non-negative `char` or `pt`, such as `2char` | `w:ind @w:firstLineChars` or `@w:firstLine` |
+| `hdocx-line-spacing` | positive multiple or exact `pt` | `w:spacing @w:line` and `@w:lineRule` |
+| `hdocx-line-spacing-exact` | positive `pt`, such as `18pt` | `w:spacing @w:lineRule="exact"` |
+| `hdocx-space-before` | `0`, non-negative `pt`, or `line`, such as `0.5line` | `w:spacing @w:before` or `@w:beforeLines` |
+| `hdocx-space-after` | `0`, non-negative `pt`, or `line`, such as `0.5line` | `w:spacing @w:after` or `@w:afterLines` |
+
+Example for paper body text:
+
+```css
+@hdocx-set body {
+  select: style(BodyText);
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+body {
+  hdocx-text-align: justify;
+  hdocx-first-line-indent: 2char;
+  hdocx-line-spacing-exact: 18pt;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
+}
+
+@hdocx-edit mode(all-runs);
+
+body {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-size: 10.5pt;
+}
+```
+
+Always run `hdocx_plan` and inspect the resulting target set, declaration
+diagnostics, and patch list before applying.
 """
 
 
@@ -725,7 +865,7 @@ def _guidance_tool(args: dict[str, Any]) -> dict[str, Any]:
             }
             for resource in selected
         ],
-        "prompts": ["hdocx_safe_edit", "hdocx_format_change", "hdocx_roundtrip_check"],
+        "prompts": ["hdocx_create_docx", "hdocx_safe_edit", "hdocx_format_change", "hdocx_roundtrip_check"],
     }
 
 
@@ -771,6 +911,35 @@ Required calls:
 
 Never change read-only ids, manifest metadata, original/original.docx, or
 protected placeholders. If the edit cannot be proven safe, stop with a report.
+"""
+
+
+def _create_docx_prompt(args: dict[str, Any]) -> str:
+    root = _prompt_value(args, "root", "<workspace-root>")
+    out = _prompt_value(args, "out", "created.docx")
+    goal = _prompt_value(args, "goal", "<new document goal>")
+    title = _prompt_value(args, "title", "<optional title>")
+    work = _prompt_value(args, "work", "created.hdocx")
+    return f"""Create a new DOCX with H-DOCX.
+
+Workspace root: {root}
+Output DOCX: {out}
+Optional H-DOCX bundle: {work}
+Title: {title}
+Goal: {goal}
+
+Use `hdocx_create`, not an ad hoc ZIP writer. The tool creates a canonical DOCX
+from the built-in blank template. Provide body text as `paragraphs` when the
+content is known. Set `exportTo={work}` when you want to continue editing through
+`document.html` and `agent.edits.hcss`.
+
+Recommended calls:
+1. hdocx_create(root, out={out}, title=..., paragraphs=[...], exportTo={work}, force=true)
+2. hdocx_plan(root, bundle={work}) if exported and further H-DOCX edits were made
+3. hdocx_apply(root, bundle={work}, out={out}) after H-DOCX edits
+4. hdocx_check(root, input={out}, work=<check bundle>, out=<checked docx>, force=true)
+
+Keep all paths inside the workspace root.
 """
 
 
@@ -859,6 +1028,24 @@ def _path_arg(args: dict[str, Any], name: str, *, must_exist: bool = False) -> P
     return resolved
 
 
+def _string_list_arg(args: dict[str, Any], name: str) -> list[str] | None:
+    value = args.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise HDocxError("MCP_INVALID_ARGUMENT", f"{name} must be an array of strings.", {"argument": name})
+    return value
+
+
+def _optional_string_arg(args: dict[str, Any], name: str) -> str | None:
+    value = args.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise HDocxError("MCP_INVALID_ARGUMENT", f"{name} must be a string.", {"argument": name})
+    return value
+
+
 def _root_arg(args: dict[str, Any]) -> Path:
     raw_root = args.get("root")
     if raw_root is None:
@@ -913,7 +1100,7 @@ def _error_response(request_id: Any, code: int, message: str, data: dict[str, An
 
 
 def _write_message(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, ensure_ascii=False, separators=(",", ":")))
+    sys.stdout.write(json.dumps(message, ensure_ascii=True, separators=(",", ":")))
     sys.stdout.write("\n")
     sys.stdout.flush()
 

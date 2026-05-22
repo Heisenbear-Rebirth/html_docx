@@ -29,8 +29,8 @@ Agent 格式预设用于复用声明。
 
 ```css
 [data-hdocx-style-id="Normal"][data-hdocx-type="paragraph"]:not([data-hdocx-lock="protected"]) {
-  hdocx-font-family-east-asia: "SimSun";
-  hdocx-font-family-ascii: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-family: "Times New Roman";
   hdocx-font-size: 12pt;
   hdocx-line-spacing: 1.5;
   hdocx-first-line-indent: 2char;
@@ -192,8 +192,8 @@ body-paragraphs {
 
 ```css
 @hdocx-format thesis-body-text {
-  hdocx-font-family-east-asia: "SimSun";
-  hdocx-font-family-ascii: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-family: "Times New Roman";
   hdocx-font-size: 12pt;
   hdocx-line-spacing: 1.5;
   hdocx-first-line-indent: 2char;
@@ -251,8 +251,8 @@ V1 可以先不支持创建新 Word 样式，但应支持修改已有 style defi
 @hdocx-token indent.first-line 2char;
 
 @hdocx-format thesis-body-text {
-  hdocx-font-family-east-asia: token(font.cn.body);
-  hdocx-font-family-ascii: token(font.en.body);
+  hdocx-eastAsia-font: token(font.cn.body);
+  hdocx-font-family: token(font.en.body);
   hdocx-font-size: token(size.body);
   hdocx-line-spacing: token(line.body);
   hdocx-first-line-indent: token(indent.first-line);
@@ -324,8 +324,8 @@ abstract-second-sentence {
 }
 
 @hdocx-format body-text {
-  hdocx-font-family-east-asia: token(font.cn.body);
-  hdocx-font-family-ascii: token(font.en.body);
+  hdocx-eastAsia-font: token(font.cn.body);
+  hdocx-font-family: token(font.en.body);
   hdocx-font-size: token(size.body);
   hdocx-line-spacing: 1.5;
   hdocx-first-line-indent: 2char;

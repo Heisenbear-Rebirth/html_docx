@@ -10,7 +10,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from html_docx.hdocx import audit_docx, apply_hdocx, diff_docx, export_docx, plan_hdocx, roundtrip_docx, validate_hdocx
+from html_docx.hdocx import (
+    audit_docx,
+    apply_hdocx,
+    create_docx,
+    diff_docx,
+    export_docx,
+    plan_hdocx,
+    roundtrip_docx,
+    validate_hdocx,
+)
 from html_docx.utils import read_json, sha256_file
 
 
@@ -57,6 +66,41 @@ class RoundtripTests(unittest.TestCase):
         html = (work / "document.html").read_text(encoding="utf-8")
         self.assertIn('data-hdocx-id="p-000001"', html)
         self.assertIn("Hello strict roundtrip.", html)
+
+    def test_create_docx_exports_and_roundtrips(self) -> None:
+        created_docx = TMP / "created.docx"
+        created_docx_2 = TMP / "created-copy.docx"
+        work = TMP / "created.hdocx"
+        checked = TMP / "created-checked.docx"
+        check_work = TMP / "created-check.hdocx"
+
+        report = create_docx(
+            created_docx,
+            title="New H-DOCX Document",
+            paragraphs=["First paragraph.", "Second paragraph."],
+            export_dir=work,
+            force=True,
+        )
+        repeat = create_docx(
+            created_docx_2,
+            title="New H-DOCX Document",
+            paragraphs=["First paragraph.", "Second paragraph."],
+            force=True,
+        )
+        validation = validate_hdocx(work)
+        roundtrip = roundtrip_docx(created_docx, check_work, checked, force=True)
+
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["command"], "create")
+        self.assertEqual(report["paragraphCount"], 2)
+        self.assertEqual(report["export"]["command"], "export")
+        self.assertEqual(sha256_file(created_docx), sha256_file(created_docx_2))
+        self.assertTrue(validation["ok"], validation)
+        self.assertTrue(roundtrip["byteIdentical"], roundtrip)
+        html = (work / "document.html").read_text(encoding="utf-8")
+        self.assertIn("New H-DOCX Document", html)
+        self.assertIn("First paragraph.", html)
+        self.assertIn('data-hdocx-style-id="BodyText"', html)
 
     def test_complex_academic_fixture_unmodified_roundtrip_is_byte_identical(self) -> None:
         input_docx = TMP / "complex-academic.docx"
@@ -383,6 +427,209 @@ body {
         r_pr = root.findall(".//w:r", NS)[0].find("w:rPr", NS)
         self.assertIsNotNone(r_pr.find("w:b", NS))
         self.assertEqual(r_pr.find("w:sz", NS).attrib[f"{{{W_NS}}}val"], "28")
+
+    def test_hcss_paper_format_contract_maps_to_ooxml(self) -> None:
+        input_docx = TMP / "paper.docx"
+        work = TMP / "paper.hdocx"
+        output_docx = TMP / "paper-output.docx"
+        create_docx(input_docx, title="Paper Title", paragraphs=["Body paragraph."], force=True)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-set body {
+  select: style(BodyText);
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+body {
+  hdocx-text-align: justify;
+  hdocx-first-line-indent: 2char;
+  hdocx-line-spacing-exact: 18pt;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
+}
+
+@hdocx-edit mode(all-runs);
+
+body {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-size: 10.5pt;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+        apply_hdocx(work, output_docx)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["hcss"]["summary"]["ruleCount"], 2)
+        self.assertEqual(plan["hcss"]["summary"]["unsupportedDeclarationCount"], 0)
+        self.assertEqual(plan["hcss"]["rules"][0]["matchedNodeIds"], ["p-000002"])
+        self.assertEqual(plan["hcss"]["rules"][1]["patchIds"], ["patch-000002"])
+        declarations = plan["hcss"]["rules"][0]["declarations"]
+        self.assertEqual(declarations[0]["normalizedProperty"], "align")
+        self.assertEqual(declarations[0]["ooxml"], "w:pPr/w:jc @w:val")
+        with zipfile.ZipFile(output_docx, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        body_paragraph = root.findall(".//w:p", NS)[1]
+        p_pr = body_paragraph.find("w:pPr", NS)
+        spacing = p_pr.find("w:spacing", NS)
+        ind = p_pr.find("w:ind", NS)
+        self.assertEqual(p_pr.find("w:jc", NS).attrib[f"{{{W_NS}}}val"], "both")
+        self.assertEqual(ind.attrib[f"{{{W_NS}}}firstLineChars"], "200")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}line"], "360")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}lineRule"], "exact")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}before"], "0")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}after"], "0")
+        r_pr = body_paragraph.find("w:r/w:rPr", NS)
+        r_fonts = r_pr.find("w:rFonts", NS)
+        self.assertEqual(r_fonts.attrib[f"{{{W_NS}}}ascii"], "Times New Roman")
+        self.assertEqual(r_fonts.attrib[f"{{{W_NS}}}hAnsi"], "Times New Roman")
+        self.assertEqual(r_fonts.attrib[f"{{{W_NS}}}eastAsia"], "SimSun")
+        self.assertEqual(r_pr.find("w:sz", NS).attrib[f"{{{W_NS}}}val"], "21")
+
+    def test_hcss_plan_reports_unsupported_declarations_with_lines(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-set body {
+  select: [data-hdocx-type="paragraph"];
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+body {
+  font-family: Arial;
+  hdocx-font-size: 12pt;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+
+        self.assertFalse(plan["ok"], plan)
+        self.assertEqual(plan["hcss"]["summary"]["unsupportedDeclarationCount"], 2)
+        declarations = plan["hcss"]["rules"][0]["declarations"]
+        self.assertEqual(declarations[0]["property"], "font-family")
+        self.assertEqual(declarations[0]["reason"], "Only hdocx-* declarations are accepted.")
+        self.assertIsInstance(declarations[0]["line"], int)
+        self.assertEqual(declarations[1]["normalizedProperty"], "font-size")
+        self.assertEqual(declarations[1]["reason"], "Property is supported, but not in paragraph-formatting mode.")
+        self.assertIsInstance(plan["errors"][0]["line"], int)
+
+    def test_hcss_run_compound_attribute_selector_with_bom(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        output_docx = TMP / "output.docx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        hcss = """\ufeff@hdocx-edit mode(all-runs);
+
+.hdocx-r[data-hdocx-id="r-000001"] {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-size: 10.5pt;
+}
+"""
+        (work / "agent.edits.hcss").write_bytes(hcss.encode("utf-8"))
+
+        plan = plan_hdocx(work)
+        apply_hdocx(work, output_docx)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["hcss"]["rules"][0]["matchedNodeIds"], ["r-000001"])
+        self.assertEqual(plan["hcss"]["rules"][0]["patchIds"], ["patch-000001"])
+        self.assertEqual(plan["hcss"]["summary"]["unsupportedDeclarationCount"], 0)
+        with zipfile.ZipFile(output_docx, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        r_pr = root.findall(".//w:r", NS)[0].find("w:rPr", NS)
+        r_fonts = r_pr.find("w:rFonts", NS)
+        self.assertEqual(r_fonts.attrib[f"{{{W_NS}}}ascii"], "Times New Roman")
+        self.assertEqual(r_fonts.attrib[f"{{{W_NS}}}hAnsi"], "Times New Roman")
+        self.assertEqual(r_fonts.attrib[f"{{{W_NS}}}eastAsia"], "SimSun")
+        self.assertEqual(r_pr.find("w:sz", NS).attrib[f"{{{W_NS}}}val"], "21")
+
+    def test_hcss_set_alias_can_target_run_compound_selector(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-set target-run {
+  select: .hdocx-r[data-hdocx-id="r-000001"];
+}
+
+@hdocx-edit mode(all-runs);
+
+target-run {
+  hdocx-bold: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["hcss"]["rules"][0]["target"], "target-run")
+        self.assertEqual(plan["hcss"]["rules"][0]["matchedNodeIds"], ["r-000001"])
+        self.assertEqual(plan["patches"][0]["nodeId"], "r-000001")
+
+    def test_hcss_editable_run_selector_excludes_protected_nodes(self) -> None:
+        input_docx = TMP / "complex.docx"
+        work = TMP / "work.hdocx"
+        _make_complex_academic_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-set editable-runs {
+  select: .hdocx-r[data-hdocx-lock="editable"];
+}
+
+@hdocx-edit mode(all-runs);
+
+editable-runs {
+  hdocx-font-size: 10.5pt;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertGreater(plan["hcss"]["rules"][0]["matchCount"], 0)
+        self.assertTrue(all(node_id.startswith("r-") for node_id in plan["hcss"]["rules"][0]["matchedNodeIds"]))
+
+    def test_chinese_and_special_filename_path_roundtrips(self) -> None:
+        special_dir = TMP / "中文路径（测试）"
+        special_dir.mkdir()
+        input_docx = special_dir / "课程论文_人工智能高速发展对人类社会的影响3(1).docx"
+        work = special_dir / "工作副本.hdocx"
+        output_docx = special_dir / "输出（应用）.docx"
+        _make_minimal_docx(input_docx)
+
+        audit = audit_docx(input_docx)
+        export_report = export_docx(input_docx, work)
+        apply_report = apply_hdocx(work, output_docx)
+        diff = diff_docx(input_docx, output_docx)
+
+        self.assertTrue(audit["ok"], audit)
+        self.assertTrue(export_report["ok"], export_report)
+        self.assertEqual(apply_report["mode"], "copy-original-if-unmodified")
+        self.assertTrue(diff["byteIdentical"], diff)
 
     def test_hcss_class_selector_formats_paragraphs(self) -> None:
         input_docx = TMP / "input.docx"

@@ -46,7 +46,7 @@ controlled edits, and agent workflows.
 
 Current local validation at the time of this release:
 
-- `70` unit tests passing.
+- `81` unit tests passing.
 - Built-in pressure fixture round-trip: `6/6` byte-identical.
 - Real sample round-trip: byte-identical and semantically identical.
 - MCP stdio smoke test passing.
@@ -135,6 +135,20 @@ Restart your MCP client after changing its configuration.
 
 ## Editing Workflow
 
+### Create A New DOCX
+
+Use the built-in canonical blank template when the task starts from no existing
+document:
+
+```powershell
+html-docx create --out new.docx --title "Draft Title" --paragraph "First paragraph." --export-to new.hdocx --force
+html-docx check new.docx --work new-check.hdocx --out new-checked.docx --force --report new-check.json
+```
+
+`create` writes a valid DOCX package first. If `--export-to` is provided, it
+also creates an H-DOCX bundle so agents can continue through
+`document.html` and `agent.edits.hcss`.
+
 ### No-Edit Reversibility Check
 
 Use this before trusting a new document family:
@@ -208,6 +222,7 @@ Important rules:
 | Command | Purpose |
 | --- | --- |
 | `doctor` | Report runtime capabilities and optional renderer availability. |
+| `create` | Create a new canonical DOCX, optionally exporting it to H-DOCX. |
 | `audit` | Detect high-risk DOCX structures and preservation policies. |
 | `export` | Convert a DOCX into an H-DOCX bundle. |
 | `validate` | Validate an H-DOCX bundle before applying it. |
@@ -226,7 +241,13 @@ The package also installs a dedicated `html-docx-mcp` command for MCP clients.
 
 ## H-CSS Examples
 
-H-CSS is a small project-specific edit language. It is not browser CSS.
+H-CSS is a small project-specific edit language. It is not browser CSS. Every
+formatting declaration must use the `hdocx-` prefix; normal CSS declarations are
+reported as unsupported by `plan`.
+
+`hdocx_plan` is the contract boundary for agents. For each H-CSS rule it reports
+the rule line, matched H-DOCX node ids, each declaration's support status,
+normalized value, OOXML mapping, and generated patch ids.
 
 ### Paragraph Formatting
 
@@ -238,11 +259,24 @@ H-CSS is a small project-specific edit language. It is not browser CSS.
 @hdocx-edit mode(paragraph-formatting);
 
 body {
-  hdocx-align: center;
-  hdocx-line-spacing: 1.5;
+  hdocx-text-align: justify;
+  hdocx-line-spacing-exact: 18pt;
   hdocx-first-line-indent: 2char;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
 }
 ```
+
+Supported paragraph declarations:
+
+| Declaration | Value | OOXML mapping |
+| --- | --- | --- |
+| `hdocx-text-align` / `hdocx-align` | `left`, `center`, `right`, `justify`/`both` | `w:pPr/w:jc @w:val` |
+| `hdocx-first-line-indent` | non-negative `char` or `pt` | `w:pPr/w:ind @w:firstLineChars` or `@w:firstLine` |
+| `hdocx-line-spacing` | positive multiple or exact `pt` | `w:pPr/w:spacing @w:line` and `@w:lineRule` |
+| `hdocx-line-spacing-exact` | positive `pt` | `w:pPr/w:spacing @w:lineRule="exact"` |
+| `hdocx-space-before` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing @w:before` or `@w:beforeLines` |
+| `hdocx-space-after` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing @w:after` or `@w:afterLines` |
 
 ### Function Selectors
 
@@ -260,14 +294,61 @@ body {
 }
 ```
 
+Selector support is intentionally small: ids, classes, exact attribute
+selectors, class+attribute compounds such as
+`.hdocx-r[data-hdocx-id="r-000001"]`, and the H-DOCX functions above. Comma
+grouping selectors are not supported; use `@hdocx-set` blocks instead.
+
 ### Run Formatting
 
 ```css
-@hdocx-edit mode(run-formatting);
+@hdocx-edit mode(all-runs);
 
 #r-000001 {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
   hdocx-font-size: 12pt;
   hdocx-bold: true;
+}
+```
+
+Supported run declarations:
+
+| Declaration | Value | OOXML mapping |
+| --- | --- | --- |
+| `hdocx-font-family` | quoted or bare font name | `w:rFonts @w:ascii` and `@w:hAnsi` |
+| `hdocx-eastAsia-font` / `hdocx-east-asia-font` | quoted or bare font name | `w:rFonts @w:eastAsia` |
+| `hdocx-ascii-font` | quoted or bare font name | `w:rFonts @w:ascii` |
+| `hdocx-hansi-font` | quoted or bare font name | `w:rFonts @w:hAnsi` |
+| `hdocx-cs-font` | quoted or bare font name | `w:rFonts @w:cs` |
+| `hdocx-font-size` | positive `pt`, including `10.5pt` | `w:sz` half-points |
+| `hdocx-bold` | `true` or `false` | `w:b` |
+| `hdocx-italic` | `true` or `false` | `w:i` |
+| `hdocx-color` | `#RRGGBB` | `w:color @w:val` |
+
+### Paper Body Formatting
+
+```css
+@hdocx-set body {
+  select: style(BodyText);
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+body {
+  hdocx-text-align: justify;
+  hdocx-first-line-indent: 2char;
+  hdocx-line-spacing-exact: 18pt;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
+}
+
+@hdocx-edit mode(all-runs);
+
+body {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-size: 10.5pt;
 }
 ```
 
@@ -354,7 +435,7 @@ Add `html-docx-mcp` to `PATH`, then configure your MCP client with JSON:
 }
 ```
 
-The MCP server provides tools such as `hdocx_audit`, `hdocx_export`,
+The MCP server provides tools such as `hdocx_create`, `hdocx_audit`, `hdocx_export`,
 `hdocx_plan`, `hdocx_apply`, `hdocx_diff`, `hdocx_check`,
 `hdocx_batch_check`, `hdocx_inspect`, `hdocx_render_check`, and
 `hdocx_guidance`.
@@ -368,6 +449,7 @@ hdocx://guide/hcss
 hdocx://guide/acceptance
 hdocx://guide/edge-cases
 
+hdocx_create_docx
 hdocx_safe_edit
 hdocx_format_change
 hdocx_roundtrip_check
@@ -382,9 +464,14 @@ resolve inside that root. If `root` is omitted, the server uses
 `HDOCX_MCP_ROOT`, then `CLAUDE_PROJECT_DIR`, then the MCP server current
 directory.
 
+Tool calls are intended to be serialized. If a client invokes two tools at the
+same time, the server returns structured `MCP_SERVER_BUSY` instead of risking a
+broken stdio transport.
+
 Agent-facing policy:
 
 - Inspect before broad edits.
+- For new documents, call `hdocx_create` instead of writing OOXML by hand.
 - Prefer ids, named sets, and narrow selectors.
 - Treat advanced structures as protected unless a dedicated mode supports the
   requested operation.
@@ -395,6 +482,7 @@ Agent-facing policy:
 Use validation according to the risk of the task:
 
 - Source changes: `python -m unittest discover -s tests`
+- New DOCX from scratch: `html-docx create` followed by `html-docx check`
 - New or unknown DOCX: `html-docx audit` and `html-docx check`
 - Edited DOCX: `html-docx apply` followed by `html-docx diff`
 - Conversion logic changes: `generate-fixtures` followed by `batch-check`
@@ -409,6 +497,7 @@ invalidate byte-identical no-edit checks.
 
 Currently supported areas include:
 
+- Canonical new DOCX creation from the built-in blank template.
 - Editable run text.
 - Run formatting and run split operations.
 - Paragraph formatting.

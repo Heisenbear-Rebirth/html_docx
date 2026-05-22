@@ -17,7 +17,7 @@ python -m unittest discover -s tests
 Expected current result:
 
 ```text
-70 tests passing
+81 tests passing
 ```
 
 ## CLI Smoke Tests

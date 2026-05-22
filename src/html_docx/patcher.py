@@ -297,6 +297,8 @@ def _patch_run_properties_fragment(run_xml: str, properties: dict[str, str | Non
             patched_rpr = _patch_rpr_empty_property(patched_rpr, prefix, "i", value)
         elif name == "font-size":
             patched_rpr = _patch_rpr_sized_property(patched_rpr, prefix, value)
+        elif name in {"font-family", "ascii-font", "hansi-font", "east-asia-font", "cs-font"}:
+            patched_rpr = _patch_rpr_fonts_property(patched_rpr, prefix, name, value)
         elif name == "color":
             patched_rpr = _patch_rpr_color_property(patched_rpr, prefix, value)
         else:
@@ -327,6 +329,8 @@ def _patch_paragraph_properties_fragment(paragraph_xml: str, properties: dict[st
             patched_ppr = _patch_ppr_first_line_fragment(patched_ppr, prefix, value)
         elif name == "line-spacing":
             patched_ppr = _patch_ppr_line_spacing_fragment(patched_ppr, prefix, value)
+        elif name in {"space-before", "space-after"}:
+            patched_ppr = _patch_ppr_space_fragment(patched_ppr, prefix, name, value)
         else:
             return None
         if patched_ppr is None:
@@ -365,6 +369,20 @@ def _patch_ppr_line_spacing_fragment(ppr_xml: str, prefix: str, value: str | Non
     return _patch_child_start_attrs(ppr_xml, prefix, "pPr", "spacing", attrs)
 
 
+def _patch_ppr_space_fragment(ppr_xml: str, prefix: str, name: str, value: str | None) -> str | None:
+    attr = "before" if name == "space-before" else "after"
+    line_attr = f"{attr}Lines"
+    attrs: dict[str, str | None] = {attr: None, line_attr: None}
+    if value is not None:
+        if value.endswith("pt"):
+            attrs[attr] = str(round(float(value[:-2]) * 20))
+        elif value.endswith("line"):
+            attrs[line_attr] = str(round(float(value[:-4]) * 100))
+        else:
+            return None
+    return _patch_child_start_attrs(ppr_xml, prefix, "pPr", "spacing", attrs)
+
+
 def _patch_rpr_empty_property(rpr_xml: str, prefix: str, local_name: str, value: str | None) -> str | None:
     if value is None:
         return _remove_child_element(rpr_xml, prefix, local_name)
@@ -395,6 +413,22 @@ def _patch_rpr_color_property(rpr_xml: str, prefix: str, value: str | None) -> s
     if len(normalized) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in normalized):
         return None
     return _upsert_child_element(rpr_xml, prefix, "color", f'<{prefix}:color {prefix}:val="{normalized.upper()}"/>')
+
+
+def _patch_rpr_fonts_property(rpr_xml: str, prefix: str, name: str, value: str | None) -> str | None:
+    if name == "font-family":
+        attrs = {"ascii": value, "hAnsi": value}
+    elif name == "ascii-font":
+        attrs = {"ascii": value}
+    elif name == "hansi-font":
+        attrs = {"hAnsi": value}
+    elif name == "east-asia-font":
+        attrs = {"eastAsia": value}
+    elif name == "cs-font":
+        attrs = {"cs": value}
+    else:
+        return None
+    return _patch_child_start_attrs(rpr_xml, prefix, "rPr", "rFonts", attrs)
 
 
 def _child_element_pattern(prefix: str, local_name: str) -> re.Pattern[str]:
@@ -599,6 +633,8 @@ def _patch_paragraph_properties(paragraph: ET.Element, properties: dict[str, str
             _set_first_line_indent(p_pr, value)
         elif name == "line-spacing":
             _set_line_spacing(p_pr, value)
+        elif name in {"space-before", "space-after"}:
+            _set_space_before_after(p_pr, name, value)
         else:
             raise HDocxError(
                 "PATCH_UNSUPPORTED_PARAGRAPH_PROPERTY",
@@ -693,6 +729,34 @@ def _set_line_spacing(p_pr: ET.Element, value: str | None) -> None:
         existing.attrib[_tag("lineRule")] = "auto"
 
 
+def _set_space_before_after(p_pr: ET.Element, name: str, value: str | None) -> None:
+    existing = p_pr.find("w:spacing", NS)
+    if existing is None:
+        if value is None:
+            return
+        existing = ET.SubElement(p_pr, _tag("spacing"))
+    attr = "before" if name == "space-before" else "after"
+    line_attr = f"{attr}Lines"
+    if value is None:
+        existing.attrib.pop(_tag(attr), None)
+        existing.attrib.pop(_tag(line_attr), None)
+        if not existing.attrib:
+            p_pr.remove(existing)
+        return
+    existing.attrib.pop(_tag(attr), None)
+    existing.attrib.pop(_tag(line_attr), None)
+    if value.endswith("pt"):
+        existing.attrib[_tag(attr)] = str(round(float(value[:-2]) * 20))
+    elif value.endswith("line"):
+        existing.attrib[_tag(line_attr)] = str(round(float(value[:-4]) * 100))
+    else:
+        raise HDocxError(
+            "PATCH_INVALID_PARAGRAPH_SPACE",
+            "Paragraph spacing must use pt or line units.",
+            {"property": name, "value": value},
+        )
+
+
 def _patch_run_properties(run: ET.Element, properties: dict[str, str | None]) -> None:
     r_pr = run.find("w:rPr", NS)
     if r_pr is None:
@@ -710,6 +774,8 @@ def _patch_rpr_properties(r_pr: ET.Element, properties: dict[str, str | None]) -
             _set_on_off(r_pr, "i", value)
         elif name == "font-size":
             _set_font_size(r_pr, value)
+        elif name in {"font-family", "ascii-font", "hansi-font", "east-asia-font", "cs-font"}:
+            _set_run_font(r_pr, name, value)
         elif name == "color":
             _set_color(r_pr, value)
         else:
@@ -758,6 +824,33 @@ def _set_font_size(r_pr: ET.Element, value: str | None) -> None:
     if existing is None:
         existing = ET.SubElement(r_pr, _tag("sz"))
     existing.attrib[_tag("val")] = str(half_points)
+
+
+def _set_run_font(r_pr: ET.Element, name: str, value: str | None) -> None:
+    existing = r_pr.find("w:rFonts", NS)
+    if existing is None:
+        if value is None:
+            return
+        existing = ET.SubElement(r_pr, _tag("rFonts"))
+    if name == "font-family":
+        attrs = ["ascii", "hAnsi"]
+    elif name == "ascii-font":
+        attrs = ["ascii"]
+    elif name == "hansi-font":
+        attrs = ["hAnsi"]
+    elif name == "east-asia-font":
+        attrs = ["eastAsia"]
+    elif name == "cs-font":
+        attrs = ["cs"]
+    else:
+        raise HDocxError("PATCH_UNSUPPORTED_RUN_FONT", "Unsupported run font property.", {"property": name})
+    for attr in attrs:
+        if value is None:
+            existing.attrib.pop(_tag(attr), None)
+        else:
+            existing.attrib[_tag(attr)] = value
+    if value is None and not existing.attrib:
+        r_pr.remove(existing)
 
 
 def _set_color(r_pr: ET.Element, value: str | None) -> None:
@@ -937,6 +1030,8 @@ def _patch_ppr_element(p_pr: ET.Element, properties: dict[str, str | None]) -> N
             _set_first_line_indent(p_pr, value)
         elif name == "line-spacing":
             _set_line_spacing(p_pr, value)
+        elif name in {"space-before", "space-after"}:
+            _set_space_before_after(p_pr, name, value)
         else:
             raise HDocxError(
                 "PATCH_UNSUPPORTED_PARAGRAPH_PROPERTY",

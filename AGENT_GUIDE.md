@@ -14,6 +14,17 @@ Editable content must patch exactly. Protected content must be preserved. If an 
 
 ## Standard Workflow
 
+For a new document, create from the canonical blank template instead of writing
+OOXML by hand:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m html_docx create --out new.docx --title "Draft Title" --paragraph "First paragraph." --export-to new.hdocx --force
+python -m html_docx check new.docx --work new-check.hdocx --out new-checked.docx --force --report new-check.json
+```
+
+For an existing document:
+
 ```powershell
 $env:PYTHONPATH = "src"
 python -m html_docx export input.docx --out work.hdocx --force
@@ -71,7 +82,9 @@ Use `audit` before editing unfamiliar real-world DOCX files. Treat reported high
 
 ## H-CSS Safety Pattern
 
-Prefer named sets before broad edits:
+Prefer named sets before broad edits. H-CSS is not browser CSS: formatting
+declarations must use the `hdocx-` prefix, and `plan` will reject unsupported
+declarations with a line number and reason.
 
 ```css
 @hdocx-set body {
@@ -81,10 +94,65 @@ Prefer named sets before broad edits:
 @hdocx-edit mode(paragraph-formatting);
 
 body {
-  hdocx-line-spacing: 1.5;
+  hdocx-text-align: justify;
+  hdocx-line-spacing-exact: 18pt;
   hdocx-first-line-indent: 2char;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
 }
 ```
+
+Use `@hdocx-edit mode(paragraph-formatting);` for:
+
+| Declaration | Value | OOXML mapping |
+| --- | --- | --- |
+| `hdocx-text-align` / `hdocx-align` | `left`, `center`, `right`, `justify`/`both` | `w:pPr/w:jc @w:val` |
+| `hdocx-first-line-indent` | non-negative `char` or `pt` | `w:pPr/w:ind` |
+| `hdocx-line-spacing` | positive multiple or exact `pt` | `w:pPr/w:spacing` |
+| `hdocx-line-spacing-exact` | positive `pt` | `w:pPr/w:spacing @w:lineRule="exact"` |
+| `hdocx-space-before` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing` |
+| `hdocx-space-after` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing` |
+
+Use `@hdocx-edit mode(all-runs);` for:
+
+| Declaration | Value | OOXML mapping |
+| --- | --- | --- |
+| `hdocx-font-family` | font name | `w:rFonts @w:ascii` and `@w:hAnsi` |
+| `hdocx-eastAsia-font` / `hdocx-east-asia-font` | font name | `w:rFonts @w:eastAsia` |
+| `hdocx-ascii-font` / `hdocx-hansi-font` / `hdocx-cs-font` | font name | `w:rFonts` script-specific attributes |
+| `hdocx-font-size` | positive `pt` | `w:sz` half-points |
+| `hdocx-bold` / `hdocx-italic` | `true` or `false` | `w:b` / `w:i` |
+| `hdocx-color` | `#RRGGBB` | `w:color @w:val` |
+
+Typical paper-body format:
+
+```css
+@hdocx-set body {
+  select: style(BodyText);
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+body {
+  hdocx-text-align: justify;
+  hdocx-first-line-indent: 2char;
+  hdocx-line-spacing-exact: 18pt;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
+}
+
+@hdocx-edit mode(all-runs);
+
+body {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-size: 10.5pt;
+}
+```
+
+After writing H-CSS, run `plan` first and inspect `hcss.rules[]`: it contains
+selector matches, declaration support, OOXML mappings, per-rule errors, and
+generated patch ids.
 
 Function selectors keep common targeting concise:
 
@@ -101,6 +169,11 @@ Function selectors keep common targeting concise:
   select: part(/word/header1.xml, paragraph);
 }
 ```
+
+Supported selectors are ids, classes, exact attributes, class+attribute
+compounds such as `.hdocx-r[data-hdocx-id="r-000001"]`, and the H-DOCX
+functions above. Comma grouping selectors are intentionally unsupported; use
+`@hdocx-set` for reusable groups.
 
 If a selector may legitimately match nothing, make that explicit:
 

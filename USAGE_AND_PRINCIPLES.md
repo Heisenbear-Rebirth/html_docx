@@ -64,17 +64,38 @@ H-DOCX 只允许两类安全编辑：
 1. 直接修改已投影的可编辑文本。
 2. 通过 H-CSS 使用受支持的格式或对象替换操作。
 
+H-CSS 不是浏览器 CSS。所有格式声明都必须使用 `hdocx-` 前缀；
+`plan` 会报告选择器命中的节点、每条声明是否支持、规范化值、OOXML 映射、patch id，
+以及不支持声明的行号和原因。
+
 例如：
 
 ```css
 @hdocx-edit mode(paragraph-formatting);
 
 #p-000001 {
-  hdocx-align: center;
+  hdocx-text-align: justify;
   hdocx-first-line-indent: 2char;
-  hdocx-line-spacing: 1.5;
+  hdocx-line-spacing-exact: 18pt;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
+}
+
+@hdocx-edit mode(all-runs);
+
+#p-000001 {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-size: 10.5pt;
 }
 ```
+
+当前支持的段落声明包括：`hdocx-text-align`/`hdocx-align`、
+`hdocx-first-line-indent`、`hdocx-line-spacing`、`hdocx-line-spacing-exact`、
+`hdocx-space-before`、`hdocx-space-after`。当前支持的 run 声明包括：
+`hdocx-font-family`、`hdocx-eastAsia-font`/`hdocx-east-asia-font`、
+`hdocx-ascii-font`、`hdocx-hansi-font`、`hdocx-cs-font`、`hdocx-font-size`、
+`hdocx-bold`、`hdocx-italic`、`hdocx-color`。
 
 高级对象如公式、字段、批注、修订、SmartArt、OLE、AlternateContent 等默认受保护。只有存在专门支持的编辑模式时才可以改。
 
@@ -97,7 +118,21 @@ python -m html_docx doctor
 
 ## 常用工作流
 
-### 1. 未编辑双射检查
+### 1. 新建 DOCX
+
+如果没有已有 DOCX，先从 canonical blank 模板创建：
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m html_docx create --out new.docx --title "Draft Title" --paragraph "First paragraph." --export-to new.hdocx --force
+python -m html_docx check new.docx --work new-check.hdocx --out new-checked.docx --force --report new-check.json
+```
+
+这不是让 Agent 手写 OOXML，而是由工具生成可验证的 DOCX 包。传入
+`--export-to` 后可以继续编辑 `new.hdocx/document.html` 和
+`new.hdocx/agent.edits.hcss`。
+
+### 2. 未编辑双射检查
 
 用于证明一个 DOCX 可以无损往返：
 
@@ -115,7 +150,7 @@ python -m html_docx check input.docx --work check.hdocx --out checked.docx --for
 
 如果 SHA256 一致，说明输出 DOCX 每一个字节都与输入相同。这比视觉渲染一致更强。
 
-### 2. 受控编辑
+### 3. 受控编辑
 
 推荐流程：
 
@@ -131,7 +166,7 @@ python -m html_docx diff input.docx output.docx --report diff.json
 
 Agent 修改前应先 inspect 目标节点、样式、列表、表格或图片，避免使用过宽选择器。
 
-### 3. H-CSS 批量定位
+### 4. H-CSS 批量定位
 
 H-CSS 支持命名集合，方便 agent 避免重复书写：
 
@@ -158,7 +193,7 @@ H-CSS 支持命名集合，方便 agent 避免重复书写：
 }
 ```
 
-### 4. 压力测试
+### 5. 压力测试
 
 修改转换逻辑后运行：
 
@@ -177,7 +212,7 @@ python -m html_docx batch-check pressure-fixtures --work pressure-work --out pre
 - 批注、修订、公式。
 - 高级受保护对象。
 
-### 5. 可选渲染 QA
+### 6. 可选渲染 QA
 
 如果系统 PATH 中存在 LibreOffice/soffice，可以运行：
 

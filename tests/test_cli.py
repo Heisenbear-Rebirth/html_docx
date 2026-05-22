@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from html_docx.cli import main
+from html_docx.mcp_server import HDocxMcpServer
 from test_roundtrip import (
     _make_audit_feature_docx,
     _make_complex_academic_docx,
@@ -121,6 +122,77 @@ class CLITests(unittest.TestCase):
         self.assertFalse(report["capabilities"]["requiresExternalRuntime"])
         self.assertIn("rendering", report["capabilities"])
         self.assertIn("available", report["capabilities"]["rendering"])
+
+    def test_create_command_can_export_new_docx(self) -> None:
+        output_docx = TMP / "created.docx"
+        work = TMP / "created.hdocx"
+        report_path = TMP / "created.json"
+
+        with redirect_stdout(StringIO()):
+            self.assertEqual(
+                main(
+                    [
+                        "create",
+                        "--out",
+                        str(output_docx),
+                        "--title",
+                        "Created From CLI",
+                        "--paragraph",
+                        "Body paragraph.",
+                        "--export-to",
+                        str(work),
+                        "--force",
+                        "--report",
+                        str(report_path),
+                    ]
+                ),
+                0,
+            )
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["command"], "create")
+        self.assertTrue(output_docx.exists())
+        self.assertTrue((work / "manifest.json").exists())
+        self.assertEqual(report["export"]["command"], "export")
+
+    def test_mcp_returns_busy_instead_of_breaking_transport(self) -> None:
+        server = HDocxMcpServer()
+        self.assertTrue(server._tool_lock.acquire(blocking=False))
+        try:
+            response = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "hdocx_doctor", "arguments": {}},
+                }
+            )
+        finally:
+            server._tool_lock.release()
+
+        result = response["result"]
+        self.assertTrue(result["isError"], response)
+        self.assertEqual(result["structuredContent"]["error"]["code"], "MCP_SERVER_BUSY")
+
+    def test_plan_command_handles_bom_parse_error_without_stdout_crash(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        _make_minimal_docx(input_docx)
+
+        with redirect_stdout(StringIO()):
+            self.assertEqual(main(["export", str(input_docx), "--out", str(work)]), 0)
+        (work / "agent.edits.hcss").write_bytes(
+            "\ufeff@hdocx-edit mode(all-runs);\n\n.hdocx-r, .other { hdocx-bold: true; }\n".encode("utf-8")
+        )
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            code = main(["plan", str(work)])
+
+        self.assertEqual(code, 2)
+        report = json.loads(stdout.getvalue())
+        self.assertFalse(report["ok"], report)
+        self.assertEqual(report["errors"][0]["code"], "HCSS_PARSE_UNSUPPORTED_SYNTAX")
 
     def test_audit_report_file_contains_advanced_object_summary(self) -> None:
         input_docx = TMP / "audit-features.docx"
@@ -290,10 +362,47 @@ class CLITests(unittest.TestCase):
         self.assertEqual(responses[0]["result"]["capabilities"]["tools"]["listChanged"], False)
         tool_names = {tool["name"] for tool in responses[1]["result"]["tools"]}
         self.assertIn("hdocx_check", tool_names)
+        self.assertIn("hdocx_create", tool_names)
         self.assertIn("hdocx_export", tool_names)
         self.assertIn("hdocx_guidance", tool_names)
         self.assertFalse(responses[2]["result"]["isError"])
         self.assertTrue(responses[2]["result"]["structuredContent"]["ok"])
+
+    def test_mcp_create_tool_creates_and_exports_docx(self) -> None:
+        from html_docx.mcp_server import HDocxMcpServer
+
+        server = HDocxMcpServer()
+        root = TMP / "mcp-create"
+        root.mkdir()
+
+        response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 20,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_create",
+                    "arguments": {
+                        "root": str(root),
+                        "out": "created.docx",
+                        "title": "MCP Created",
+                        "paragraphs": ["Created by MCP."],
+                        "exportTo": "created.hdocx",
+                        "force": True,
+                    },
+                },
+            }
+        )
+
+        self.assertIsNotNone(response)
+        result = response["result"]
+        self.assertFalse(result["isError"], result)
+        payload = result["structuredContent"]
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["command"], "create")
+        self.assertEqual(payload["export"]["command"], "export")
+        self.assertTrue((root / "created.docx").exists())
+        self.assertTrue((root / "created.hdocx" / "manifest.json").exists())
 
     def test_mcp_exposes_guidance_resources_prompts_and_tool(self) -> None:
         from html_docx.mcp_server import HDocxMcpServer
@@ -322,6 +431,7 @@ class CLITests(unittest.TestCase):
         prompts = server.handle_message({"jsonrpc": "2.0", "id": 3, "method": "prompts/list", "params": {}})
         self.assertIsNotNone(prompts)
         prompt_names = {item["name"] for item in prompts["result"]["prompts"]}
+        self.assertIn("hdocx_create_docx", prompt_names)
         self.assertIn("hdocx_safe_edit", prompt_names)
         self.assertIn("hdocx_format_change", prompt_names)
 

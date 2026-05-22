@@ -43,7 +43,7 @@ H-DOCX 采用不同策略：
 
 当前版本的本地验收结果：
 
-- `70` 个单元测试通过。
+- `81` 个单元测试通过。
 - 内置压力 fixture 往返：`6/6` 字节级一致。
 - 真实样例往返：字节级一致，语义节点一致。
 - MCP stdio smoke test 通过。
@@ -128,6 +128,19 @@ html-docx doctor
 
 ## 编辑工作流
 
+### 新建 DOCX
+
+如果任务不是修改已有文档，而是从零开始创建文档，请使用内置 canonical blank
+模板：
+
+```powershell
+html-docx create --out new.docx --title "Draft Title" --paragraph "First paragraph." --export-to new.hdocx --force
+html-docx check new.docx --work new-check.hdocx --out new-checked.docx --force --report new-check.json
+```
+
+`create` 会先写出一个有效 DOCX 包。如果传入 `--export-to`，它还会同时导出
+H-DOCX bundle，便于 agent 继续通过 `document.html` 和 `agent.edits.hcss` 编辑。
+
 ### 未编辑双射检查
 
 遇到新的文档类型时，先证明它可以无损往返：
@@ -198,6 +211,7 @@ work.hdocx/
 | 命令 | 用途 |
 | --- | --- |
 | `doctor` | 报告运行时能力和可选渲染器状态。 |
+| `create` | 新建 canonical DOCX，可选同步导出 H-DOCX。 |
 | `audit` | 检测高风险 DOCX 结构和保留策略。 |
 | `export` | 把 DOCX 导出为 H-DOCX bundle。 |
 | `validate` | 在 apply 前验证 H-DOCX bundle。 |
@@ -216,7 +230,12 @@ work.hdocx/
 
 ## H-CSS 示例
 
-H-CSS 是本项目自定义的编辑语言，不是浏览器 CSS。
+H-CSS 是本项目自定义的编辑语言，不是浏览器 CSS。所有格式声明都必须使用
+`hdocx-` 前缀；普通 CSS 声明会在 `plan` 阶段被报告为不支持。
+
+`hdocx_plan` 是 Agent 写格式声明时的契约边界。它会对每条 H-CSS 规则报告：
+规则行号、命中的 H-DOCX 节点 id、每条声明是否支持、规范化后的值、OOXML 映射、
+以及该规则会生成的 patch id。
 
 ### 段落格式
 
@@ -228,11 +247,24 @@ H-CSS 是本项目自定义的编辑语言，不是浏览器 CSS。
 @hdocx-edit mode(paragraph-formatting);
 
 body {
-  hdocx-align: center;
-  hdocx-line-spacing: 1.5;
+  hdocx-text-align: justify;
+  hdocx-line-spacing-exact: 18pt;
   hdocx-first-line-indent: 2char;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
 }
 ```
+
+支持的段落声明：
+
+| 声明 | 取值 | OOXML 映射 |
+| --- | --- | --- |
+| `hdocx-text-align` / `hdocx-align` | `left`、`center`、`right`、`justify`/`both` | `w:pPr/w:jc @w:val` |
+| `hdocx-first-line-indent` | 非负 `char` 或 `pt` | `w:pPr/w:ind @w:firstLineChars` 或 `@w:firstLine` |
+| `hdocx-line-spacing` | 正数倍数或精确 `pt` | `w:pPr/w:spacing @w:line` 和 `@w:lineRule` |
+| `hdocx-line-spacing-exact` | 正数 `pt` | `w:pPr/w:spacing @w:lineRule="exact"` |
+| `hdocx-space-before` | `0`、非负 `pt` 或 `line` | `w:pPr/w:spacing @w:before` 或 `@w:beforeLines` |
+| `hdocx-space-after` | `0`、非负 `pt` 或 `line` | `w:pPr/w:spacing @w:after` 或 `@w:afterLines` |
 
 ### 函数选择器
 
@@ -250,14 +282,60 @@ body {
 }
 ```
 
+选择器支持范围刻意较小：id、class、精确属性选择器、class+属性复合选择器
+（例如 `.hdocx-r[data-hdocx-id="r-000001"]`），以及上面的 H-DOCX 函数。
+不支持逗号分组选择器；需要复用目标时请使用 `@hdocx-set`。
+
 ### Run 格式
 
 ```css
-@hdocx-edit mode(run-formatting);
+@hdocx-edit mode(all-runs);
 
 #r-000001 {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
   hdocx-font-size: 12pt;
   hdocx-bold: true;
+}
+```
+
+支持的 run 声明：
+
+| 声明 | 取值 | OOXML 映射 |
+| --- | --- | --- |
+| `hdocx-font-family` | 带引号或不带引号的字体名 | `w:rFonts @w:ascii` 和 `@w:hAnsi` |
+| `hdocx-eastAsia-font` / `hdocx-east-asia-font` | 带引号或不带引号的字体名 | `w:rFonts @w:eastAsia` |
+| `hdocx-ascii-font` | 带引号或不带引号的字体名 | `w:rFonts @w:ascii` |
+| `hdocx-hansi-font` | 带引号或不带引号的字体名 | `w:rFonts @w:hAnsi` |
+| `hdocx-cs-font` | 带引号或不带引号的字体名 | `w:rFonts @w:cs` |
+| `hdocx-font-size` | 正数 `pt`，例如 `10.5pt` | `w:sz` 半磅值 |
+| `hdocx-bold` | `true` 或 `false` | `w:b` |
+| `hdocx-italic` | `true` 或 `false` | `w:i` |
+| `hdocx-color` | `#RRGGBB` | `w:color @w:val` |
+
+### 论文正文格式示例
+
+```css
+@hdocx-set body {
+  select: style(BodyText);
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+body {
+  hdocx-text-align: justify;
+  hdocx-first-line-indent: 2char;
+  hdocx-line-spacing-exact: 18pt;
+  hdocx-space-before: 0;
+  hdocx-space-after: 0;
+}
+
+@hdocx-edit mode(all-runs);
+
+body {
+  hdocx-font-family: "Times New Roman";
+  hdocx-eastAsia-font: "SimSun";
+  hdocx-font-size: 10.5pt;
 }
 ```
 
@@ -344,7 +422,7 @@ html-docx-mcp
 }
 ```
 
-MCP server 提供 `hdocx_audit`、`hdocx_export`、`hdocx_plan`、
+MCP server 提供 `hdocx_create`、`hdocx_audit`、`hdocx_export`、`hdocx_plan`、
 `hdocx_apply`、`hdocx_diff`、`hdocx_check`、`hdocx_batch_check`、
 `hdocx_inspect`、`hdocx_render_check`、`hdocx_guidance` 等 tools。
 
@@ -357,6 +435,7 @@ hdocx://guide/hcss
 hdocx://guide/acceptance
 hdocx://guide/edge-cases
 
+hdocx_create_docx
 hdocx_safe_edit
 hdocx_format_change
 hdocx_roundtrip_check
@@ -369,9 +448,13 @@ Agent 编辑前应读取相关 resource。若某个 MCP 客户端不展示 resou
 如果不传 `root`，server 会依次使用 `HDOCX_MCP_ROOT`、`CLAUDE_PROJECT_DIR`，
 最后才使用 MCP server 当前目录。
 
+Tool 调用应串行执行。如果客户端同时调用两个工具，server 会返回结构化的
+`MCP_SERVER_BUSY`，而不是冒险打断 stdio transport。
+
 Agent 策略：
 
 - 大范围编辑前必须 inspect。
+- 新建文档时调用 `hdocx_create`，不要手写 OOXML 包。
 - 优先使用 id、命名集合和窄选择器。
 - 除非有专门模式支持，否则高级结构一律视为受保护。
 - 声称成功前必须运行 `plan`、`apply` 和 `diff`。
@@ -381,6 +464,7 @@ Agent 策略：
 按任务风险选择验证：
 
 - 修改源码：`python -m unittest discover -s tests`
+- 从零新建 DOCX：`html-docx create` 后运行 `html-docx check`
 - 新 DOCX 或未知 DOCX：`html-docx audit` 和 `html-docx check`
 - 编辑 DOCX：`html-docx apply` 后运行 `html-docx diff`
 - 修改转换核心：`generate-fixtures` 后运行 `batch-check`
@@ -393,6 +477,7 @@ Agent 策略：
 
 当前支持：
 
+- 使用内置 blank 模板新建 canonical DOCX。
 - 可编辑 run 文本。
 - Run 格式和 run split。
 - 段落格式。

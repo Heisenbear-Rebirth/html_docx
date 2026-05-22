@@ -126,8 +126,10 @@ agent.edits.hcss
 H-CSS 允许的属性必须是白名单，例如：
 
 - `hdocx-font-size`
-- `hdocx-font-family-ascii`
-- `hdocx-font-family-east-asia`
+- `hdocx-font-family`
+- `hdocx-ascii-font`
+- `hdocx-hansi-font`
+- `hdocx-eastAsia-font` / `hdocx-east-asia-font`
 - `hdocx-bold`
 - `hdocx-italic`
 - `hdocx-underline`

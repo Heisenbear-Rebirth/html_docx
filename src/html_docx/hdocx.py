@@ -9,6 +9,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
+from .creator import create_canonical_docx
 from .errors import HDocxError
 from .html_scan import collect_hdocx_ids, collect_hdocx_nodes
 from .package import (
@@ -38,7 +39,19 @@ RUN_PROPERTY_ATTRS = {
     "bold": "data-hdocx-bold",
     "italic": "data-hdocx-italic",
     "font-size": "data-hdocx-font-size",
+    "font-family": "data-hdocx-font-family",
+    "ascii-font": "data-hdocx-ascii-font",
+    "hansi-font": "data-hdocx-hansi-font",
+    "east-asia-font": "data-hdocx-east-asia-font",
+    "cs-font": "data-hdocx-cs-font",
     "color": "data-hdocx-color",
+}
+RUN_PROPERTY_ALIASES = {
+    "font": "font-family",
+    "eastAsia-font": "east-asia-font",
+    "eastasia-font": "east-asia-font",
+    "east-asian-font": "east-asia-font",
+    "latin-font": "font-family",
 }
 DRAWING_PROPERTY_ATTRS = {
     "alt": "data-hdocx-alt",
@@ -49,6 +62,30 @@ PARAGRAPH_PROPERTY_ATTRS = {
     "align": "data-hdocx-align",
     "first-line-indent": "data-hdocx-first-line-indent",
     "line-spacing": "data-hdocx-line-spacing",
+    "space-before": "data-hdocx-space-before",
+    "space-after": "data-hdocx-space-after",
+}
+PARAGRAPH_PROPERTY_ALIASES = {
+    "text-align": "align",
+    "alignment": "align",
+    "line-spacing-exact": "line-spacing",
+    "line-spacingExact": "line-spacing",
+}
+OOXML_PROPERTY_MAP = {
+    "bold": "w:rPr/w:b",
+    "italic": "w:rPr/w:i",
+    "font-size": "w:rPr/w:sz half-points",
+    "font-family": "w:rPr/w:rFonts @w:ascii and @w:hAnsi",
+    "ascii-font": "w:rPr/w:rFonts @w:ascii",
+    "hansi-font": "w:rPr/w:rFonts @w:hAnsi",
+    "east-asia-font": "w:rPr/w:rFonts @w:eastAsia",
+    "cs-font": "w:rPr/w:rFonts @w:cs",
+    "color": "w:rPr/w:color @w:val",
+    "align": "w:pPr/w:jc @w:val",
+    "first-line-indent": "w:pPr/w:ind @w:firstLine or @w:firstLineChars",
+    "line-spacing": "w:pPr/w:spacing @w:line and @w:lineRule",
+    "space-before": "w:pPr/w:spacing @w:before or @w:beforeLines",
+    "space-after": "w:pPr/w:spacing @w:after or @w:afterLines",
 }
 PARAGRAPH_NUMBERING_ATTRS = {
     "numId": "data-hdocx-num-id",
@@ -88,6 +125,32 @@ STYLES_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocess
 NUMBERING_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"
 STYLES_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles"
 NUMBERING_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering"
+
+
+def create_docx(
+    output_docx: Path,
+    *,
+    title: str | None = None,
+    paragraphs: list[str] | None = None,
+    template: str = "blank",
+    force: bool = False,
+    export_dir: Path | None = None,
+) -> dict[str, Any]:
+    create_report = create_canonical_docx(
+        output_docx,
+        title=title,
+        paragraphs=paragraphs,
+        template=template,
+        force=force,
+    )
+    if export_dir is None:
+        return create_report
+    export_report = export_docx(output_docx, export_dir, force=force)
+    return {
+        **create_report,
+        "export": export_report,
+        "hdocx": str(export_dir.resolve()),
+    }
 
 
 def export_docx(input_docx: Path, output_dir: Path, *, force: bool = False) -> dict[str, Any]:
@@ -250,6 +313,8 @@ def plan_hdocx(bundle_dir: Path) -> dict[str, Any]:
             "patches": analysis["patches"],
             "summary": f"Planned {len(analysis['patches'])} document patch(es).",
         }
+    if analysis.get("hcss") is not None:
+        report["hcss"] = analysis["hcss"]
     _append_audit(bundle_dir, report)
     return report
 
@@ -568,6 +633,7 @@ def doctor_report() -> dict[str, Any]:
             "requiresExternalRuntime": False,
             "requiresNetwork": False,
             "bundleFormat": "H-DOCX",
+            "creation": {"available": True, "templates": ["blank"]},
             "rendering": render_capabilities(),
         },
     }
@@ -1302,8 +1368,9 @@ body {
 
 def _default_agent_hcss() -> str:
     return """/* H-CSS edit script.
-   This first implementation validates the bundle and supports unmodified roundtrip.
-   Future phases will compile H-CSS declarations into OOXML patches.
+   Supported declarations are listed in hdocx_guidance(topic="hcss").
+   Run hdocx_plan before hdocx_apply; it reports selector matches,
+   declaration support, OOXML mappings, and patch ids.
 */
 """
 
@@ -1394,8 +1461,9 @@ def _analyze_edits(bundle_dir: Path) -> dict[str, Any]:
     patches.extend(part_patches)
     errors.extend(part_errors)
 
+    hcss_diagnostics = None
     if AGENT_HCSS_NAME in modified_files:
-        hcss_patches, hcss_errors, edit_index = _compile_hcss_edits(
+        hcss_patches, hcss_errors, edit_index, hcss_diagnostics = _compile_hcss_edits(
             bundle_dir,
             manifest,
             html_nodes,
@@ -1411,6 +1479,7 @@ def _analyze_edits(bundle_dir: Path) -> dict[str, Any]:
             "modifiedParts": [patch["partPath"] for patch in part_patches],
             "patches": patches,
             "errors": errors,
+            "hcss": hcss_diagnostics,
         }
 
     manifest_nodes = manifest.get("nodes", {})
@@ -1699,6 +1768,7 @@ def _analyze_edits(bundle_dir: Path) -> dict[str, Any]:
         "modifiedParts": [patch["partPath"] for patch in part_patches],
         "patches": patches,
         "errors": errors,
+        "hcss": hcss_diagnostics,
     }
 
 
@@ -1900,10 +1970,32 @@ def _extract_run_property_overrides(html_attrs: dict[str, str]) -> tuple[list[di
     return errors, properties
 
 
+def _canonical_run_property_name(prop_name: str) -> str:
+    return RUN_PROPERTY_ALIASES.get(prop_name, RUN_PROPERTY_ALIASES.get(prop_name.lower(), prop_name))
+
+
+def _canonical_paragraph_property_name(prop_name: str) -> str:
+    return PARAGRAPH_PROPERTY_ALIASES.get(
+        prop_name,
+        PARAGRAPH_PROPERTY_ALIASES.get(prop_name.lower(), prop_name),
+    )
+
+
+def _canonical_hcss_property_name(prop_name: str) -> str:
+    paragraph_name = _canonical_paragraph_property_name(prop_name)
+    if paragraph_name in PARAGRAPH_PROPERTY_ATTRS:
+        return paragraph_name
+    run_name = _canonical_run_property_name(prop_name)
+    if run_name in RUN_PROPERTY_ATTRS:
+        return run_name
+    return prop_name
+
+
 def _normalize_run_property(prop_name: str, raw_value: str | None) -> str | None:
+    prop_name = _canonical_run_property_name(prop_name)
     if raw_value is None or raw_value == "":
         return None
-    value = raw_value.strip()
+    value = _strip_hcss_value(raw_value.strip())
     if prop_name in {"bold", "italic"}:
         lowered = value.lower()
         if lowered in {"true", "1", "on", "yes"}:
@@ -1926,13 +2018,20 @@ def _normalize_run_property(prop_name: str, raw_value: str | None) -> str | None
         if len(normalized) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in normalized):
             raise ValueError("color must be #RRGGBB.")
         return f"#{normalized.lower()}"
+    if prop_name in {"font-family", "ascii-font", "hansi-font", "east-asia-font", "cs-font"}:
+        if not value:
+            raise ValueError(f"{prop_name} must not be empty.")
+        if any(ord(ch) < 32 for ch in value):
+            raise ValueError(f"{prop_name} must not contain control characters.")
+        return value
     raise ValueError(f"Unsupported run property: {prop_name}")
 
 
 def _normalize_paragraph_property(prop_name: str, raw_value: str | None) -> str | None:
+    prop_name = _canonical_paragraph_property_name(prop_name)
     if raw_value is None or raw_value == "":
         return None
-    value = raw_value.strip()
+    value = _strip_hcss_value(raw_value.strip())
     if prop_name == "align":
         aliases = {"justify": "justify", "both": "justify", "left": "left", "right": "right", "center": "center"}
         normalized = aliases.get(value.lower())
@@ -1975,6 +2074,27 @@ def _normalize_paragraph_property(prop_name: str, raw_value: str | None) -> str 
         if multiple <= 0:
             raise ValueError("line-spacing must be positive.")
         return f"{multiple:g}"
+    if prop_name in {"space-before", "space-after"}:
+        if value == "0":
+            return "0pt"
+        if value.endswith("pt"):
+            try:
+                points = float(value[:-2])
+            except ValueError as exc:
+                raise ValueError(f"{prop_name} pt value must be numeric.") from exc
+            if points < 0:
+                raise ValueError(f"{prop_name} must not be negative.")
+            return f"{points:g}pt"
+        if value.endswith("line"):
+            number = value[:-4]
+            try:
+                lines = float(number)
+            except ValueError as exc:
+                raise ValueError(f"{prop_name} line value must be numeric.") from exc
+            if lines < 0:
+                raise ValueError(f"{prop_name} must not be negative.")
+            return f"{lines:g}line"
+        raise ValueError(f"{prop_name} must use 0, pt, or line units.")
     raise ValueError(f"Unsupported paragraph property: {prop_name}")
 
 
@@ -1983,11 +2103,14 @@ def _compile_hcss_edits(
     manifest: dict[str, Any],
     html_nodes: dict[str, Any],
     edit_index: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    text = (bundle_dir / AGENT_HCSS_NAME).read_text(encoding="utf-8")
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, dict[str, Any]]:
+    text = (bundle_dir / AGENT_HCSS_NAME).read_text(encoding="utf-8-sig")
     program, parse_errors = _parse_hcss(text)
+    diagnostics = _hcss_diagnostics_base(modified=True)
     if parse_errors:
-        return [], parse_errors, edit_index
+        diagnostics["parseErrors"] = parse_errors
+        diagnostics["summary"]["errorCount"] = len(parse_errors)
+        return [], parse_errors, edit_index, diagnostics
 
     patches: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -2073,23 +2196,55 @@ def _compile_hcss_edits(
 
     for rule in program["rules"]:
         target_ids = _resolve_hcss_target(rule["target"], program["sets"], html_nodes)
+        allow_empty = _hcss_target_allows_empty(rule["target"], program["sets"])
+        rule_diag = {
+            "line": rule.get("line"),
+            "target": rule["target"],
+            "mode": rule["mode"],
+            "allowEmpty": allow_empty,
+            "matchedNodeIds": target_ids,
+            "matchCount": len(target_ids),
+            "declarations": [],
+            "patchIds": [],
+            "errors": [],
+        }
+        diagnostics["rules"].append(rule_diag)
         if not target_ids:
-            if _hcss_target_allows_empty(rule["target"], program["sets"]):
+            if allow_empty:
+                _update_hcss_diagnostics_summary(diagnostics)
                 continue
-            errors.append(
+            error = (
                 {
                     "code": "HCSS_SELECTOR_ZERO_MATCH",
                     "message": "H-CSS rule matched no H-DOCX nodes.",
                     "target": rule["target"],
+                    "line": rule.get("line"),
                 }
             )
+            errors.append(error)
+            rule_diag["errors"].append(error)
+            _update_hcss_diagnostics_summary(diagnostics)
             continue
         expanded = _expand_hcss_declarations(rule["declarations"], program["formats"], program["tokens"])
         if expanded["errors"]:
+            _annotate_hcss_errors(expanded["errors"], rule.get("declarationMeta", []), rule.get("line"))
             errors.extend(expanded["errors"])
+            rule_diag["errors"].extend(expanded["errors"])
+            rule_diag["declarations"] = _hcss_declaration_diagnostics(
+                rule["mode"],
+                rule["declarations"],
+                rule.get("declarationMeta", []),
+            )
+            _update_hcss_diagnostics_summary(diagnostics)
             continue
         declarations = expanded["declarations"]
+        rule_diag["declarations"] = _hcss_declaration_diagnostics(
+            rule["mode"],
+            declarations,
+            rule.get("declarationMeta", []),
+        )
         mode = rule["mode"]
+        patch_base = len(patches)
         if mode == "paragraph-formatting":
             new_errors, new_patches, edit_index = _compile_hcss_paragraph_rule(
                 target_ids, declarations, manifest_nodes, edit_index
@@ -2139,14 +2294,20 @@ def _compile_hcss_edits(
                 }
             ]
             new_patches = []
+        _annotate_hcss_errors(new_errors, rule_diag["declarations"], rule.get("line"))
         errors.extend(new_errors)
         patches.extend(new_patches)
+        rule_diag["errors"].extend(new_errors)
+        rule_diag["patchIds"] = [patch["id"] for patch in patches[patch_base:]]
+        _update_hcss_diagnostics_summary(diagnostics)
 
-    return patches, errors, edit_index
+    _update_hcss_diagnostics_summary(diagnostics)
+    return patches, errors, edit_index, diagnostics
 
 
 def _parse_hcss(text: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    stripped = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    text = text.lstrip("\ufeff")
+    stripped = _strip_hcss_comments_preserve_lines(text)
     tokens: dict[str, str] = {}
     sets: dict[str, dict[str, Any]] = {}
     formats: dict[str, list[tuple[str, str]]] = {}
@@ -2189,13 +2350,23 @@ def _parse_hcss(text: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         if not block_name:
             continue
         name = block_name.strip()
-        declarations = _parse_hcss_declarations(block_body)
+        rule_line = stripped[: match.start()].count("\n") + 1
+        body_line = stripped[: match.start(6)].count("\n") + 1
+        declarations, declaration_meta = _parse_hcss_declarations_with_meta(block_body, body_line)
         if block_kind == "@hdocx-set":
             sets[name] = _parse_hcss_set(name, declarations)
         elif block_kind == "@hdocx-format":
             formats[name] = [(key, value) for key, value in declarations if key != "@hdocx-include"]
         else:
-            rules.append({"target": name, "mode": mode, "declarations": declarations})
+            rules.append(
+                {
+                    "target": name,
+                    "mode": mode,
+                    "declarations": declarations,
+                    "line": rule_line,
+                    "declarationMeta": declaration_meta,
+                }
+            )
 
     remainder = pattern.sub("", stripped).strip()
     if remainder:
@@ -2220,6 +2391,14 @@ def _parse_hcss(text: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         "styleDeletions": style_deletions,
         "listCreations": list_creations,
     }, errors
+
+
+def _strip_hcss_comments_preserve_lines(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        comment = match.group(0)
+        return "\n" * comment.count("\n")
+
+    return re.sub(r"/\*.*?\*/", replace, text, flags=re.DOTALL)
 
 
 def _parse_hcss_image_insertion_blocks(text: str) -> tuple[str, list[dict[str, Any]]]:
@@ -2319,20 +2498,179 @@ def _parse_hcss_list_blocks(text: str) -> tuple[str, list[dict[str, Any]]]:
 
 
 def _parse_hcss_declarations(body: str) -> list[tuple[str, str]]:
+    declarations, _ = _parse_hcss_declarations_with_meta(body)
+    return declarations
+
+
+def _parse_hcss_declarations_with_meta(body: str, base_line: int = 1) -> tuple[list[tuple[str, str]], list[dict[str, Any]]]:
     declarations: list[tuple[str, str]] = []
+    metadata: list[dict[str, Any]] = []
+    offset = 0
     for raw in body.split(";"):
+        raw_start = offset
+        offset += len(raw) + 1
         item = raw.strip()
         if not item:
             continue
+        leading = len(raw) - len(raw.lstrip())
+        line = base_line + body[: raw_start + leading].count("\n")
         if item.startswith("@hdocx-include "):
-            declarations.append(("@hdocx-include", item[len("@hdocx-include ") :].strip()))
+            value = item[len("@hdocx-include ") :].strip()
+            declarations.append(("@hdocx-include", value))
+            metadata.append({"line": line, "property": "@hdocx-include", "value": value})
             continue
         if ":" not in item:
             declarations.append(("__parse_error__", item))
+            metadata.append({"line": line, "property": "__parse_error__", "value": item})
             continue
         key, value = item.split(":", 1)
-        declarations.append((key.strip(), value.strip()))
-    return declarations
+        prop = key.strip()
+        raw_value = value.strip()
+        declarations.append((prop, raw_value))
+        metadata.append({"line": line, "property": prop, "value": raw_value})
+    return declarations, metadata
+
+
+def _hcss_diagnostics_base(*, modified: bool) -> dict[str, Any]:
+    return {
+        "modified": modified,
+        "rules": [],
+        "parseErrors": [],
+        "summary": {
+            "ruleCount": 0,
+            "matchedNodeCount": 0,
+            "supportedDeclarationCount": 0,
+            "unsupportedDeclarationCount": 0,
+            "patchCount": 0,
+            "errorCount": 0,
+        },
+    }
+
+
+def _update_hcss_diagnostics_summary(diagnostics: dict[str, Any]) -> None:
+    rules = diagnostics.get("rules", [])
+    declarations = [declaration for rule in rules for declaration in rule.get("declarations", [])]
+    diagnostics["summary"] = {
+        "ruleCount": len(rules),
+        "matchedNodeCount": sum(rule.get("matchCount", 0) for rule in rules),
+        "supportedDeclarationCount": sum(1 for declaration in declarations if declaration.get("supported")),
+        "unsupportedDeclarationCount": sum(1 for declaration in declarations if not declaration.get("supported")),
+        "patchCount": sum(len(rule.get("patchIds", [])) for rule in rules),
+        "errorCount": len(diagnostics.get("parseErrors", []))
+        + sum(len(rule.get("errors", [])) for rule in rules),
+    }
+
+
+def _hcss_declaration_diagnostics(
+    mode: str,
+    declarations: list[tuple[str, str]],
+    declaration_meta: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    metadata = declaration_meta or []
+    diagnostics: list[dict[str, Any]] = []
+    for index, (key, value) in enumerate(declarations):
+        meta = metadata[index] if index < len(metadata) else {}
+        diagnostic: dict[str, Any] = {
+            "line": meta.get("line"),
+            "property": key,
+            "value": value,
+            "supported": False,
+        }
+        if key == "__parse_error__":
+            diagnostic["reason"] = "Invalid declaration syntax; expected property: value;"
+            diagnostics.append(diagnostic)
+            continue
+        if key == "@hdocx-include":
+            diagnostic["supported"] = True
+            diagnostic["kind"] = "format-include"
+            diagnostics.append(diagnostic)
+            continue
+        if not key.startswith("hdocx-"):
+            diagnostic["reason"] = "Only hdocx-* declarations are accepted."
+            diagnostics.append(diagnostic)
+            continue
+        raw_prop = key.removeprefix("hdocx-")
+        paragraph_prop = _canonical_paragraph_property_name(raw_prop)
+        run_prop = _canonical_run_property_name(raw_prop)
+        allowed_paragraph = mode in {"paragraph-formatting", "style-definition", "direct-formatting"}
+        allowed_run = mode in {"all-runs", "style-definition", "direct-formatting"}
+        if allowed_paragraph and paragraph_prop in PARAGRAPH_PROPERTY_ATTRS:
+            try:
+                if raw_prop in {"line-spacing-exact", "line-spacingExact"} and not _strip_hcss_value(value).endswith("pt"):
+                    raise ValueError("line-spacing-exact must use pt units.")
+                normalized = _normalize_paragraph_property(paragraph_prop, value)
+            except ValueError as exc:
+                diagnostic.update(
+                    {
+                        "normalizedProperty": paragraph_prop,
+                        "reason": str(exc),
+                        "ooxml": OOXML_PROPERTY_MAP.get(paragraph_prop),
+                    }
+                )
+            else:
+                diagnostic.update(
+                    {
+                        "supported": True,
+                        "normalizedProperty": paragraph_prop,
+                        "normalizedValue": normalized,
+                        "ooxml": OOXML_PROPERTY_MAP.get(paragraph_prop),
+                    }
+                )
+            diagnostics.append(diagnostic)
+            continue
+        if allowed_run and run_prop in RUN_PROPERTY_ATTRS:
+            try:
+                normalized = _normalize_run_property(run_prop, value)
+            except ValueError as exc:
+                diagnostic.update(
+                    {
+                        "normalizedProperty": run_prop,
+                        "reason": str(exc),
+                        "ooxml": OOXML_PROPERTY_MAP.get(run_prop),
+                    }
+                )
+            else:
+                diagnostic.update(
+                    {
+                        "supported": True,
+                        "normalizedProperty": run_prop,
+                        "normalizedValue": normalized,
+                        "ooxml": OOXML_PROPERTY_MAP.get(run_prop),
+                    }
+                )
+            diagnostics.append(diagnostic)
+            continue
+        diagnostic["normalizedProperty"] = _canonical_hcss_property_name(raw_prop)
+        if paragraph_prop in PARAGRAPH_PROPERTY_ATTRS or run_prop in RUN_PROPERTY_ATTRS:
+            diagnostic["reason"] = f"Property is supported, but not in {mode} mode."
+        else:
+            diagnostic["reason"] = "Unsupported H-CSS property."
+        diagnostic["ooxml"] = OOXML_PROPERTY_MAP.get(diagnostic["normalizedProperty"])
+        diagnostics.append(diagnostic)
+    return diagnostics
+
+
+def _annotate_hcss_errors(
+    errors: list[dict[str, Any]],
+    declaration_diagnostics: list[dict[str, Any]],
+    rule_line: int | None,
+) -> None:
+    for error in errors:
+        if "line" in error:
+            continue
+        prop = error.get("property")
+        matched_line = None
+        if prop is not None:
+            prop_text = str(prop)
+            for declaration in declaration_diagnostics:
+                names = {
+                    str(declaration.get("property")),
+                    str(declaration.get("normalizedProperty")),
+                }
+                if prop_text in names or f"hdocx-{prop_text}" in names:
+                    matched_line = declaration.get("line")
+                    break
+        error["line"] = matched_line or rule_line
 
 
 def _parse_hcss_set(name: str, declarations: list[tuple[str, str]]) -> dict[str, Any]:
@@ -3468,7 +3806,7 @@ def _compile_hcss_direct_rule(
     manifest_nodes: dict[str, Any],
     edit_index: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
-    prop_names = {key.removeprefix("hdocx-") for key, _ in declarations if key.startswith("hdocx-")}
+    prop_names = {_canonical_hcss_property_name(key.removeprefix("hdocx-")) for key, _ in declarations if key.startswith("hdocx-")}
     if prop_names and prop_names.issubset(PARAGRAPH_PROPERTY_ATTRS):
         return _compile_hcss_paragraph_rule(target_ids, declarations, manifest_nodes, edit_index)
     if prop_names and prop_names.issubset(RUN_PROPERTY_ATTRS):
@@ -3496,14 +3834,24 @@ def _compile_hcss_style_definition_rule(
             edit_index,
         )
     paragraph_props, paragraph_errors = _hcss_paragraph_properties(
-        [(key, value) for key, value in declarations if key.removeprefix("hdocx-") in PARAGRAPH_PROPERTY_ATTRS]
+        [
+            (key, value)
+            for key, value in declarations
+            if key.startswith("hdocx-")
+            and _canonical_paragraph_property_name(key.removeprefix("hdocx-")) in PARAGRAPH_PROPERTY_ATTRS
+        ]
     )
     run_props, run_errors = _hcss_run_properties(
-        [(key, value) for key, value in declarations if key.removeprefix("hdocx-") in RUN_PROPERTY_ATTRS]
+        [
+            (key, value)
+            for key, value in declarations
+            if key.startswith("hdocx-")
+            and _canonical_run_property_name(key.removeprefix("hdocx-")) in RUN_PROPERTY_ATTRS
+        ]
     )
     known_props = set(PARAGRAPH_PROPERTY_ATTRS) | set(RUN_PROPERTY_ATTRS)
     for key, _ in declarations:
-        if not key.startswith("hdocx-") or key.removeprefix("hdocx-") not in known_props:
+        if not key.startswith("hdocx-") or _canonical_hcss_property_name(key.removeprefix("hdocx-")) not in known_props:
             errors.append({"code": "HCSS_STYLE_PROPERTY_UNSUPPORTED", "message": "Unsupported style-definition property.", "property": key})
     errors.extend(paragraph_errors)
     errors.extend(run_errors)
@@ -4019,7 +4367,7 @@ def _hcss_run_properties(declarations: list[tuple[str, str]]) -> tuple[dict[str,
         if not key.startswith("hdocx-"):
             errors.append({"code": "HCSS_UNSUPPORTED_DECLARATION", "message": "Only hdocx-* declarations are allowed.", "property": key})
             continue
-        prop_name = key.removeprefix("hdocx-")
+        prop_name = _canonical_run_property_name(key.removeprefix("hdocx-"))
         if prop_name not in RUN_PROPERTY_ATTRS:
             errors.append({"code": "HCSS_RUN_PROPERTY_UNSUPPORTED", "message": "Unsupported run property for all-runs mode.", "property": prop_name})
             continue
@@ -4037,11 +4385,14 @@ def _hcss_paragraph_properties(declarations: list[tuple[str, str]]) -> tuple[dic
         if not key.startswith("hdocx-"):
             errors.append({"code": "HCSS_UNSUPPORTED_DECLARATION", "message": "Only hdocx-* declarations are allowed.", "property": key})
             continue
-        prop_name = key.removeprefix("hdocx-")
+        raw_prop = key.removeprefix("hdocx-")
+        prop_name = _canonical_paragraph_property_name(raw_prop)
         if prop_name not in PARAGRAPH_PROPERTY_ATTRS:
             errors.append({"code": "HCSS_PARAGRAPH_PROPERTY_UNSUPPORTED", "message": "Unsupported paragraph property for paragraph-formatting mode.", "property": prop_name})
             continue
         try:
+            if raw_prop in {"line-spacing-exact", "line-spacingExact"} and not _strip_hcss_value(value).endswith("pt"):
+                raise ValueError("line-spacing-exact must use pt units.")
             properties[prop_name] = _normalize_paragraph_property(prop_name, value)
         except ValueError as exc:
             errors.append({"code": "HCSS_INVALID_PARAGRAPH_PROPERTY", "message": str(exc), "property": prop_name, "value": value})

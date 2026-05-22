@@ -13,6 +13,7 @@ from .hdocx import (
     audit_docx,
     batch_check_docx,
     check_docx,
+    create_docx,
     diff_docx,
     doctor_report,
     export_docx,
@@ -28,6 +29,16 @@ from .utils import write_json
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="html-docx", description="H-DOCX reversible DOCX editing CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    create_parser = subparsers.add_parser("create", help="Create a new canonical DOCX")
+    create_parser.add_argument("--out", required=True, type=Path)
+    create_parser.add_argument("--title")
+    create_parser.add_argument("--paragraph", action="append", dest="paragraphs")
+    create_parser.add_argument("--template", default="blank", choices=["blank"])
+    create_parser.add_argument("--force", action="store_true")
+    create_parser.add_argument("--export-to", type=Path)
+    create_parser.add_argument("--report", type=Path)
+    create_parser.set_defaults(func=_cmd_create)
 
     export_parser = subparsers.add_parser("export", help="Export DOCX to an H-DOCX bundle")
     export_parser.add_argument("input", type=Path)
@@ -149,6 +160,17 @@ def _cmd_export(args: argparse.Namespace) -> dict[str, Any]:
     return export_docx(args.input, args.out, force=args.force)
 
 
+def _cmd_create(args: argparse.Namespace) -> dict[str, Any]:
+    return create_docx(
+        args.out,
+        title=args.title,
+        paragraphs=args.paragraphs,
+        template=args.template,
+        force=args.force,
+        export_dir=args.export_to,
+    )
+
+
 def _cmd_validate(args: argparse.Namespace) -> dict[str, Any]:
     return validate_hdocx(args.bundle)
 
@@ -204,5 +226,10 @@ def _cmd_mcp(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _print_json(payload: dict[str, Any]) -> None:
-    json.dump(payload, sys.stdout, ensure_ascii=False, indent=2, sort_keys=True)
-    sys.stdout.write("\n")
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    stdout_buffer = getattr(sys.stdout, "buffer", None)
+    if stdout_buffer is not None:
+        stdout_buffer.write(text.encode("utf-8"))
+        stdout_buffer.flush()
+        return
+    sys.stdout.write(text)

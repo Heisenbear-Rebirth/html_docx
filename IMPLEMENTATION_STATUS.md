@@ -105,6 +105,10 @@ Current H-CSS behavior:
 
 - Batch paragraph formatting.
 - Batch run formatting.
+- Explicit formatting declaration contract for common academic layout:
+  - run: font family, Latin script fonts, East Asian fonts, complex-script fonts, font size, bold, italic, color.
+  - paragraph: alignment, first-line indent, exact or multiple line spacing, space before, space after.
+- `plan` returns H-CSS diagnostics with selector matches, declaration support, normalized values, OOXML mappings, line numbers, per-rule errors, and generated patch ids.
 - Direct `#node-id` selectors.
 - `.class` selectors.
 - Function selectors:
@@ -180,7 +184,7 @@ Inspection supports `node`, `style`, `list`, `table`, and `image`.
 Current automated tests:
 
 ```text
-70 tests passing
+81 tests passing
 ```
 
 Coverage includes:
@@ -194,6 +198,10 @@ Coverage includes:
 - Paragraph formatting patch.
 - H-CSS paragraph formatting.
 - H-CSS token/format/include/all-runs.
+- H-CSS paper-format declaration contract and OOXML mapping.
+- H-CSS unsupported declaration diagnostics with line numbers.
+- H-CSS run-level class+attribute selectors, UTF-8 BOM handling, and set aliases.
+- H-CSS comma grouping selector parse errors without MCP/CLI transport failure.
 - H-CSS `#node-id`, `.class`, and `allow-empty` selector behavior.
 - H-CSS function selector behavior for type, style, list, and part targeting.
 - H-CSS style-definition patch.
@@ -205,6 +213,8 @@ Coverage includes:
 - H-CSS list creation and paragraph numbering assignment.
 - H-CSS multi-level list creation and second-level assignment.
 - H-CSS zero-match failure.
+- Chinese and mixed special-character DOCX paths for audit/export/apply/diff.
+- MCP busy response instead of transport-breaking concurrent tool execution.
 - Protected run text/format failure.
 - Protected node text modification failure.
 - ID tamper failure.

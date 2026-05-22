@@ -127,15 +127,15 @@ H-DOCX 必须区分三类编辑单位。
 <span
   data-hdocx-type="run"
   data-hdocx-id="r-0010"
-  data-hdocx-font-family-east-asia="SimSun"
-  data-hdocx-font-family-ascii="Times New Roman">中文 English</span>
+  data-hdocx-east-asia-font="SimSun"
+  data-hdocx-font-family="Times New Roman">中文 English</span>
 ```
 
 如果用户要求某几个字符使用完全不同字体，则拆分 run：
 
 ```html
-<span data-hdocx-type="run" data-hdocx-id="r-0011" data-hdocx-font-family-east-asia="SimSun">中文</span>
-<span data-hdocx-type="run" data-hdocx-id="r-0012" data-hdocx-font-family-ascii="Times New Roman">English</span>
+<span data-hdocx-type="run" data-hdocx-id="r-0011" data-hdocx-east-asia-font="SimSun">中文</span>
+<span data-hdocx-type="run" data-hdocx-id="r-0012" data-hdocx-font-family="Times New Roman">English</span>
 ```
 
 ### 5.3 判定

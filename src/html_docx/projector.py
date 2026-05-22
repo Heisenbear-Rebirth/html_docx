@@ -49,6 +49,18 @@ def _paragraph_properties(paragraph: ET.Element) -> dict[str, str]:
                 props["first-line-indent"] = f"{int(first_line) / 20:g}pt"
     spacing = p_pr.find("w:spacing", NS)
     if spacing is not None:
+        before = spacing.attrib.get(_tag("before"))
+        before_lines = spacing.attrib.get(_tag("beforeLines"))
+        if before and before.isdigit():
+            props["space-before"] = f"{int(before) / 20:g}pt"
+        elif before_lines and before_lines.isdigit():
+            props["space-before"] = f"{int(before_lines) / 100:g}line"
+        after = spacing.attrib.get(_tag("after"))
+        after_lines = spacing.attrib.get(_tag("afterLines"))
+        if after and after.isdigit():
+            props["space-after"] = f"{int(after) / 20:g}pt"
+        elif after_lines and after_lines.isdigit():
+            props["space-after"] = f"{int(after_lines) / 100:g}line"
         line_rule = spacing.attrib.get(_tag("lineRule"))
         line = spacing.attrib.get(_tag("line"))
         if line and line.isdigit():
@@ -280,6 +292,23 @@ def _rpr_properties(r_pr: ET.Element | None) -> dict[str, str]:
         props["bold"] = "true"
     if _truthy_on_off(r_pr.find("w:i", NS)):
         props["italic"] = "true"
+    r_fonts = r_pr.find("w:rFonts", NS)
+    if r_fonts is not None:
+        ascii_font = r_fonts.attrib.get(_tag("ascii"))
+        hansi_font = r_fonts.attrib.get(_tag("hAnsi"))
+        if ascii_font and hansi_font and ascii_font == hansi_font:
+            props["font-family"] = ascii_font
+        else:
+            if ascii_font:
+                props["ascii-font"] = ascii_font
+            if hansi_font:
+                props["hansi-font"] = hansi_font
+        east_asia_font = r_fonts.attrib.get(_tag("eastAsia"))
+        if east_asia_font:
+            props["east-asia-font"] = east_asia_font
+        cs_font = r_fonts.attrib.get(_tag("cs"))
+        if cs_font:
+            props["cs-font"] = cs_font
     sz = r_pr.find("w:sz", NS)
     if sz is not None:
         raw = sz.attrib.get(_tag("val"))

@@ -40,6 +40,7 @@ Use the local source tree while developing:
 
 ```powershell
 $env:PYTHONPATH = "src"
+python -m html_docx create --out new.docx --title "Draft Title" --paragraph "First paragraph." --export-to new.hdocx --force
 python -m html_docx audit input.docx --report audit.json
 python -m html_docx export input.docx --out work.hdocx --force
 python -m html_docx inspect work.hdocx --kind node --id p-000001
@@ -107,6 +108,11 @@ Supported convenience selectors include:
 }
 ```
 
+Supported selectors are ids, classes, exact attributes, class+attribute
+compounds such as `.hdocx-r[data-hdocx-id="r-000001"]`, and the functions above.
+Comma grouping selectors are intentionally unsupported; use `@hdocx-set` for
+reusable groups.
+
 If a selector may legitimately match nothing, declare it explicitly:
 
 ```css
@@ -115,6 +121,22 @@ If a selector may legitimately match nothing, declare it explicitly:
   allow-empty: true;
 }
 ```
+
+## Formatting Declaration Contract
+
+H-CSS is not browser CSS. Formatting declarations must use the `hdocx-`
+prefix. `hdocx_plan` reports selector matches, per-declaration support,
+normalized values, OOXML mappings, line numbers, errors, and patch ids.
+
+Use `@hdocx-edit mode(paragraph-formatting);` for paragraph declarations:
+`hdocx-text-align`/`hdocx-align`, `hdocx-first-line-indent`,
+`hdocx-line-spacing`, `hdocx-line-spacing-exact`, `hdocx-space-before`, and
+`hdocx-space-after`.
+
+Use `@hdocx-edit mode(all-runs);` for run declarations:
+`hdocx-font-family`, `hdocx-eastAsia-font`/`hdocx-east-asia-font`,
+`hdocx-ascii-font`, `hdocx-hansi-font`, `hdocx-cs-font`, `hdocx-font-size`,
+`hdocx-bold`, `hdocx-italic`, and `hdocx-color`.
 
 ## Acceptance Gates
 

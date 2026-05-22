@@ -1,0 +1,58 @@
+# Local environments
+.venv/
+.env
+.env.*
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Project-local temporary/cache directories
+.tmp/
+.pip-cache/
+
+# Generated H-DOCX working bundles
+*.hdocx/
+
+# Local DOCX samples can contain private content
+docx/*.docx
+
+# Generated validation fixtures and outputs
+pressure-fixtures/
+pressure-work/
+pressure-out/
+render-test/
+render-out/
+
+# Generated validation reports
+pressure.json
+pressure-fixtures.json
+render-test.json
+render.json
+
+# Generated DOCX check outputs under sample directories
+docx/*-checked.docx
+docx/*-check.json
+docx/*-audit.json
+docx/*-batch.json
+docx/*-check.hdocx/
+docx/*-batch-work/
+docx/*-batch-out/
+
+# Editor and OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

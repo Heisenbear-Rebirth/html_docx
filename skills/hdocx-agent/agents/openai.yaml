@@ -1,0 +1,7 @@
+interface:
+  display_name: "H-DOCX Agent"
+  short_description: "Strict DOCX editing through reversible H-DOCX bundles."
+  default_prompt: "Use $hdocx-agent to safely inspect, edit, and validate a DOCX file without disturbing its original layout."
+
+policy:
+  allow_implicit_invocation: true

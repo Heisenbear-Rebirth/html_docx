@@ -15,6 +15,9 @@ All operations must stay inside the current repository directory.
   inside this repository.
 - If a task truly requires touching anything outside this repository, stop and
   ask the user first.
+- Do not run `scripts/install-hdocx.ps1` unless the user explicitly asks for
+  user-level installation. That script is intentionally for configuring
+  user-level CLI and agent skills outside this repository.
 
 ## Core Contract
 

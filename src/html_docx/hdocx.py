@@ -3,12 +3,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import copy
+import importlib.metadata
 import platform
 import zipfile
 import re
 import sys
 import xml.etree.ElementTree as ET
 
+from . import __version__
 from .creator import create_canonical_docx
 from .errors import HDocxError
 from .html_scan import collect_hdocx_ids, collect_hdocx_nodes
@@ -21,13 +24,15 @@ from .package import (
 from .patcher import patch_document_run_text
 from .projector import (
     M_NS,
+    NS,
+    W_NS,
+    _tag,
     build_document_html,
     load_numbering_definitions,
     load_style_definitions,
     project_docx_entries,
     project_main_document,
 )
-from .rendering import render_capabilities
 from .utils import copy_file, ensure_new_dir, read_json, sha256_bytes, sha256_file, write_json
 
 
@@ -58,6 +63,12 @@ DRAWING_PROPERTY_ATTRS = {
     "width-emu": "data-hdocx-width-emu",
     "height-emu": "data-hdocx-height-emu",
 }
+IMAGE_FORMATTING_PROPERTIES = {
+    "alt",
+    "width-emu",
+    "height-emu",
+}
+IMAGE_PARAGRAPH_PROPERTY_PREFIX = "paragraph-"
 PARAGRAPH_PROPERTY_ATTRS = {
     "align": "data-hdocx-align",
     "first-line-indent": "data-hdocx-first-line-indent",
@@ -70,6 +81,22 @@ PARAGRAPH_PROPERTY_ALIASES = {
     "alignment": "align",
     "line-spacing-exact": "line-spacing",
     "line-spacingExact": "line-spacing",
+}
+PARAGRAPH_STRUCTURAL_PROPERTIES = {
+    "manual-page-break-before",
+    "insert-empty-paragraph-before",
+    "insert-empty-paragraph-after",
+}
+EMPTY_PARAGRAPH_PROPERTY_PREFIX = "empty-paragraph-"
+EMPTY_PARAGRAPH_PROPERTY_ALIASES = {
+    "line-spacing-exact": "line-spacing",
+    "line-spacingExact": "line-spacing",
+}
+EMPTY_PARAGRAPH_SUPPORTED_PROPERTIES = {
+    "style-id",
+    "line-spacing",
+    "space-before",
+    "space-after",
 }
 OOXML_PROPERTY_MAP = {
     "bold": "w:rPr/w:b",
@@ -86,7 +113,139 @@ OOXML_PROPERTY_MAP = {
     "line-spacing": "w:pPr/w:spacing @w:line and @w:lineRule",
     "space-before": "w:pPr/w:spacing @w:before or @w:beforeLines",
     "space-after": "w:pPr/w:spacing @w:after or @w:afterLines",
+    "manual-page-break-before": "insert <w:p><w:r><w:br w:type=\"page\"/></w:r></w:p> before target paragraph",
+    "insert-empty-paragraph-before": "insert empty <w:p> before target paragraph",
+    "insert-empty-paragraph-after": "insert empty <w:p> after target paragraph",
+    "empty-paragraph-style-id": "inserted empty paragraph w:pPr/w:pStyle @w:val",
+    "empty-paragraph-line-spacing": "inserted empty paragraph w:pPr/w:spacing @w:line and @w:lineRule",
+    "empty-paragraph-space-before": "inserted empty paragraph w:pPr/w:spacing @w:before or @w:beforeLines",
+    "empty-paragraph-space-after": "inserted empty paragraph w:pPr/w:spacing @w:after or @w:afterLines",
 }
+SUPPORTED_EDIT_MODES = [
+    "all-runs",
+    "paragraph-formatting",
+    "image-formatting",
+    "paragraph-structure",
+    "direct-formatting",
+    "style-definition",
+    "paragraph-style",
+    "numbering-definition",
+    "paragraph-numbering",
+    "comment-text",
+    "revision-action",
+    "equation-omml",
+]
+SUPPORTED_HCSS_PROPERTIES = {
+    "all-runs": [
+        "hdocx-font-family",
+        "hdocx-eastAsia-font",
+        "hdocx-east-asia-font",
+        "hdocx-ascii-font",
+        "hdocx-hansi-font",
+        "hdocx-cs-font",
+        "hdocx-font-size",
+        "hdocx-bold",
+        "hdocx-italic",
+        "hdocx-color",
+    ],
+    "paragraph-formatting": [
+        "hdocx-text-align",
+        "hdocx-align",
+        "hdocx-first-line-indent",
+        "hdocx-line-spacing",
+        "hdocx-line-spacing-exact",
+        "hdocx-space-before",
+        "hdocx-space-after",
+        "hdocx-manual-page-break-before",
+    ],
+    "image-formatting": [
+        "hdocx-alt",
+        "hdocx-width-emu",
+        "hdocx-height-emu",
+        "hdocx-paragraph-text-align",
+        "hdocx-paragraph-align",
+        "hdocx-paragraph-line-spacing",
+        "hdocx-paragraph-line-spacing-exact",
+        "hdocx-paragraph-space-before",
+        "hdocx-paragraph-space-after",
+    ],
+    "paragraph-structure": [
+        "hdocx-manual-page-break-before",
+        "hdocx-insert-empty-paragraph-before",
+        "hdocx-insert-empty-paragraph-after",
+        "hdocx-empty-paragraph-style-id",
+        "hdocx-empty-paragraph-line-spacing",
+        "hdocx-empty-paragraph-line-spacing-exact",
+        "hdocx-empty-paragraph-space-before",
+        "hdocx-empty-paragraph-space-after",
+    ],
+    "direct-formatting": [
+        "hdocx-text-align",
+        "hdocx-align",
+        "hdocx-first-line-indent",
+        "hdocx-line-spacing",
+        "hdocx-line-spacing-exact",
+        "hdocx-space-before",
+        "hdocx-space-after",
+        "hdocx-font-family",
+        "hdocx-eastAsia-font",
+        "hdocx-east-asia-font",
+        "hdocx-ascii-font",
+        "hdocx-hansi-font",
+        "hdocx-cs-font",
+        "hdocx-font-size",
+        "hdocx-bold",
+        "hdocx-italic",
+        "hdocx-color",
+    ],
+    "style-definition": [
+        "hdocx-text-align",
+        "hdocx-align",
+        "hdocx-first-line-indent",
+        "hdocx-line-spacing",
+        "hdocx-line-spacing-exact",
+        "hdocx-space-before",
+        "hdocx-space-after",
+        "hdocx-font-family",
+        "hdocx-eastAsia-font",
+        "hdocx-east-asia-font",
+        "hdocx-ascii-font",
+        "hdocx-hansi-font",
+        "hdocx-cs-font",
+        "hdocx-font-size",
+        "hdocx-bold",
+        "hdocx-italic",
+        "hdocx-color",
+    ],
+    "paragraph-style": ["hdocx-style-id"],
+    "numbering-definition": [
+        "hdocx-num-format",
+        "hdocx-level-text",
+        "hdocx-start",
+    ],
+    "paragraph-numbering": [
+        "hdocx-list-id",
+        "hdocx-num-id",
+        "hdocx-ilvl",
+    ],
+    "comment-text": ["hdocx-comment-text"],
+    "revision-action": ["hdocx-revision-action"],
+    "equation-omml": ["hdocx-omml-source"],
+}
+SUPPORTED_HCSS_AT_RULES = [
+    "@hdocx-token",
+    "@hdocx-set",
+    "@hdocx-format",
+    "@hdocx-include",
+    "@hdocx-style",
+    "@hdocx-delete-style",
+    "@hdocx-list",
+    "@hdocx-insert-image",
+    "@hdocx-insert-table-row",
+    "@hdocx-delete-table-row",
+    "@hdocx-insert-table-column",
+    "@hdocx-delete-table-column",
+]
 PARAGRAPH_NUMBERING_ATTRS = {
     "numId": "data-hdocx-num-id",
     "ilvl": "data-hdocx-ilvl",
@@ -321,6 +480,7 @@ def plan_hdocx(bundle_dir: Path) -> dict[str, Any]:
 
 def apply_hdocx(bundle_dir: Path, output_docx: Path) -> dict[str, Any]:
     bundle_dir = bundle_dir.resolve()
+    _validate_path_encodable(output_docx, "output")
     output_docx = output_docx.resolve()
     validation = validate_hdocx(bundle_dir)
     if not validation["ok"]:
@@ -514,6 +674,8 @@ def diff_docx(left_docx: Path, right_docx: Path) -> dict[str, Any]:
     byte_identical = left_sha == right_sha
     semantic_diff = _semantic_diff_docx(left_docx, right_docx)
     fragment_diff = _fragment_diff_docx(left_docx, right_docx, diff, semantic_diff)
+    manual_page_break_diff = _manual_page_break_diff_docx(left_docx, right_docx)
+    empty_paragraph_diff = _empty_paragraph_diff_docx(left_docx, right_docx)
     return {
         "ok": True,
         "command": "diff",
@@ -531,6 +693,8 @@ def diff_docx(left_docx: Path, right_docx: Path) -> dict[str, Any]:
         "summary": _diff_summary(diff, byte_identical),
         "semanticDiff": semantic_diff,
         "fragmentDiff": fragment_diff,
+        "manualPageBreakDiff": manual_page_break_diff,
+        "emptyParagraphDiff": empty_paragraph_diff,
         **diff,
     }
 
@@ -616,7 +780,138 @@ def inspect_hdocx(bundle_dir: Path, target_id: str, *, kind: str = "node") -> di
     )
 
 
+def query_hdocx(
+    bundle_dir: Path,
+    *,
+    kind: str = "paragraph",
+    text: str | None = None,
+    text_regex: str | None = None,
+    style_id: str | None = None,
+    font_family: str | None = None,
+    east_asia_font: str | None = None,
+    font_size: str | None = None,
+    bold: bool | None = None,
+    italic: bool | None = None,
+    color: str | None = None,
+    align: str | None = None,
+    line_spacing: str | None = None,
+    space_before: str | None = None,
+    space_after: str | None = None,
+    has_image: bool | None = None,
+    suspected_heading_level1: bool | None = None,
+    include_runs: bool = True,
+    limit: int = 100,
+) -> dict[str, Any]:
+    bundle_dir = bundle_dir.resolve()
+    validation = validate_hdocx(bundle_dir)
+    if not validation["ok"]:
+        return {"ok": False, "command": "query", "validation": validation, "matches": []}
+    manifest = _load_manifest(bundle_dir)
+    criteria = _query_criteria(
+        kind=kind,
+        text=text,
+        text_regex=text_regex,
+        style_id=style_id,
+        font_family=font_family,
+        east_asia_font=east_asia_font,
+        font_size=font_size,
+        bold=bold,
+        italic=italic,
+        color=color,
+        align=align,
+        line_spacing=line_spacing,
+        space_before=space_before,
+        space_after=space_after,
+        has_image=has_image,
+        suspected_heading_level1=suspected_heading_level1,
+        include_runs=include_runs,
+        limit=limit,
+    )
+    nodes = manifest.get("nodes", {})
+    normalized_kind = _normalize_query_kind(kind)
+    candidates = _query_candidates(nodes, normalized_kind)
+    matches: list[dict[str, Any]] = []
+    for node_id in candidates:
+        node = nodes[node_id]
+        match = _query_match(bundle_dir, manifest, node_id, node, criteria)
+        if match is not None:
+            matches.append(match)
+    limit = max(1, int(limit or 100))
+    report = {
+        "ok": True,
+        "command": "query",
+        "kind": normalized_kind,
+        "criteria": criteria,
+        "matchCount": len(matches),
+        "returnedCount": min(len(matches), limit),
+        "truncated": len(matches) > limit,
+        "matches": matches[:limit],
+    }
+    _append_audit(bundle_dir, {key: value for key, value in report.items() if key != "matches"})
+    return report
+
+
+def find_hdocx(bundle_dir: Path, **kwargs: Any) -> dict[str, Any]:
+    report = query_hdocx(bundle_dir, **kwargs)
+    report["command"] = "find"
+    return report
+
+
+def assert_hdocx(bundle_dir: Path, assertions: list[Any] | None = None) -> dict[str, Any]:
+    bundle_dir = bundle_dir.resolve()
+    validation = validate_hdocx(bundle_dir)
+    if not validation["ok"]:
+        return {"ok": False, "command": "assert", "validation": validation, "assertions": []}
+    manifest = _load_manifest(bundle_dir)
+    normalized_assertions = _normalize_assertions(assertions)
+    planned_context: dict[str, Any] | None = None
+    results: list[dict[str, Any]] = []
+    for assertion in normalized_assertions:
+        assertion_type = _normalize_assertion_type(str(assertion.get("type", "")))
+        if _assertion_after_apply(assertion):
+            if planned_context is None:
+                planned_context = _planned_assertion_context(bundle_dir, manifest)
+            if assertion_type == "text-payload-unchanged":
+                result = _assert_text_payload_unchanged_after_apply(
+                    manifest,
+                    planned_context["manifest"],
+                    assertion_type,
+                )
+            else:
+                translated_assertion = _translate_assertion_for_planned_output(assertion, planned_context["nodeIdMap"])
+                result = _run_assertion(planned_context["bundle"], planned_context["manifest"], translated_assertion)
+                if translated_assertion.get("nodeIdTranslations"):
+                    result["nodeIdTranslations"] = translated_assertion["nodeIdTranslations"]
+            result["scope"] = "planned-output"
+            result["afterApply"] = True
+            result["plannedOutput"] = {
+                "docx": str(planned_context["docx"]),
+                "bundle": str(planned_context["bundle"]),
+            }
+        else:
+            result = _run_assertion(bundle_dir, manifest, assertion)
+            result["scope"] = "planned-patches" if assertion_type == "text-payload-unchanged" else "current-bundle"
+            result["afterApply"] = False
+        results.append(result)
+    failed = [result for result in results if not result.get("passed", False)]
+    report = {
+        "ok": not failed,
+        "command": "assert",
+        "assertionCount": len(results),
+        "passedCount": len(results) - len(failed),
+        "failedCount": len(failed),
+        "assertions": results,
+    }
+    _append_audit(bundle_dir, report)
+    return report
+
+
 def doctor_report() -> dict[str, Any]:
+    loaded_module_path = Path(__file__).resolve()
+    distribution_version = _package_version()
+    package_version = __version__
+    git_commit = _git_commit_for_module(loaded_module_path)
+    module_mtime = _mtime_iso(loaded_module_path)
     return {
         "ok": True,
         "command": "doctor",
@@ -627,16 +922,83 @@ def doctor_report() -> dict[str, Any]:
         },
         "package": {
             "name": "html_docx",
+            "distributionName": "html-docx",
+            "version": package_version,
+            "sourceVersion": __version__,
+            "distributionVersion": distribution_version,
             "dependencies": [],
+            "loadedModulePath": str(loaded_module_path),
+            "moduleMtimeUtc": module_mtime,
+            "gitCommit": git_commit,
+        },
+        "runtime": {
+            "loaded_module_path": str(loaded_module_path),
+            "package_version": package_version,
+            "git_commit_or_build_time": git_commit or module_mtime,
+            "supported_edit_modes": SUPPORTED_EDIT_MODES,
+            "supported_hcss_properties": SUPPORTED_HCSS_PROPERTIES,
+            "supported_query_kinds": list(QUERY_KINDS),
+            "supported_assertions": list(ASSERTION_TYPES),
         },
         "capabilities": {
             "requiresExternalRuntime": False,
             "requiresNetwork": False,
             "bundleFormat": "H-DOCX",
             "creation": {"available": True, "templates": ["blank"]},
-            "rendering": render_capabilities(),
+            "query": {"available": True, "kinds": list(QUERY_KINDS)},
+            "assertions": {"available": True, "types": list(ASSERTION_TYPES)},
+            "hcss": {
+                "supportedEditModes": SUPPORTED_EDIT_MODES,
+                "supportedProperties": SUPPORTED_HCSS_PROPERTIES,
+                "supportedAtRules": SUPPORTED_HCSS_AT_RULES,
+            },
         },
     }
+
+
+def _package_version() -> str | None:
+    try:
+        return importlib.metadata.version("html-docx")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def _mtime_iso(path: Path) -> str | None:
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return None
+
+
+def _git_commit_for_module(module_path: Path) -> str | None:
+    for parent in [module_path.parent, *module_path.parents]:
+        git_dir = parent / ".git"
+        if not git_dir.exists():
+            continue
+        head = git_dir / "HEAD"
+        try:
+            head_text = head.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if head_text.startswith("ref: "):
+            ref_path = git_dir / head_text.removeprefix("ref: ").strip()
+            try:
+                return ref_path.read_text(encoding="utf-8").strip() or None
+            except OSError:
+                packed_refs = git_dir / "packed-refs"
+                try:
+                    ref_name = head_text.removeprefix("ref: ").strip()
+                    for line in packed_refs.read_text(encoding="utf-8").splitlines():
+                        if line.startswith("#") or not line.strip():
+                            continue
+                        commit, _, name = line.partition(" ")
+                        if name == ref_name:
+                            return commit
+                except OSError:
+                    return None
+                return None
+        return head_text or None
+    return None
 
 
 def _inspect_style(manifest: dict[str, Any], style_id: str) -> dict[str, Any]:
@@ -757,6 +1119,804 @@ def _inspect_image(manifest: dict[str, Any], image_id: str) -> dict[str, Any]:
     }
 
 
+QUERY_KINDS = ("paragraph", "run", "image", "all")
+ASSERTION_TYPES = (
+    "text-payload-unchanged",
+    "paragraphs-have-empty-before",
+    "paragraphs-have-empty-after",
+    "images-host-paragraph-not-exact-line-spacing",
+    "level1-headings-have-empty-paragraph-before",
+)
+DEFAULT_LEVEL1_HEADING_EXCLUDE_REGEX = (
+    r"^\s*(?:"
+    r"\u6458\s*\u8981|\u6458\u8981|abstract|"
+    r"\u76ee\s*\u5f55|\u76ee\u5f55|contents?|table\s+of\s+contents|"
+    r"\u5173\u952e\u8bcd|key\s*words?"
+    r")\s*[:\uff1a]?\s*$"
+)
+
+
+def _normalize_query_kind(kind: str) -> str:
+    normalized = (kind or "paragraph").strip().lower()
+    aliases = {
+        "p": "paragraph",
+        "paragraphs": "paragraph",
+        "r": "run",
+        "runs": "run",
+        "images": "image",
+        "drawing": "image",
+        "drawings": "image",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in QUERY_KINDS:
+        raise HDocxError("QUERY_KIND_UNSUPPORTED", "Unsupported query kind.", {"kind": kind, "supportedKinds": list(QUERY_KINDS)})
+    return normalized
+
+
+def _query_criteria(**kwargs: Any) -> dict[str, Any]:
+    criteria = {key: value for key, value in kwargs.items() if value is not None}
+    if "font_size" in criteria:
+        criteria["font_size"] = _normalize_query_pt(criteria["font_size"])
+    for key in ("font_family", "east_asia_font", "color", "align", "line_spacing", "space_before", "space_after", "style_id"):
+        if key in criteria and isinstance(criteria[key], str):
+            criteria[key] = criteria[key].strip()
+    if "text_regex" in criteria:
+        try:
+            re.compile(str(criteria["text_regex"]))
+        except re.error as exc:
+            raise HDocxError("QUERY_INVALID_TEXT_REGEX", "textRegex is not a valid regular expression.", {"textRegex": criteria["text_regex"], "reason": str(exc)}) from exc
+    return criteria
+
+
+def _query_candidates(nodes: dict[str, Any], kind: str) -> list[str]:
+    candidates: list[str] = []
+    for node_id, node in sorted(nodes.items(), key=lambda item: _node_sort_key(nodes, item[0])):
+        node_kind = node.get("kind")
+        if kind == "all":
+            if node_kind in {"paragraph", "run"}:
+                candidates.append(node_id)
+        elif kind == "image":
+            if node_kind == "run" and node.get("objectKind") == "drawing":
+                candidates.append(node_id)
+        elif node_kind == kind:
+            candidates.append(node_id)
+    return candidates
+
+
+def _query_match(bundle_dir: Path, manifest: dict[str, Any], node_id: str, node: dict[str, Any], criteria: dict[str, Any]) -> dict[str, Any] | None:
+    nodes = manifest.get("nodes", {})
+    styles = manifest.get("styles", {})
+    if not _query_text_matches(nodes, node_id, node, criteria):
+        return None
+    if not _query_paragraph_matches(manifest, node_id, node, criteria):
+        return None
+    if not _query_run_properties_match(manifest, node_id, node, criteria):
+        return None
+    if "has_image" in criteria and _node_has_image(nodes, node_id, node) != bool(criteria["has_image"]):
+        return None
+    if "suspected_heading_level1" in criteria:
+        paragraph_id = node_id if node.get("kind") == "paragraph" else node.get("parent")
+        paragraph = nodes.get(paragraph_id or "", {})
+        guess = _heading_level1_guess(paragraph_id or "", paragraph, nodes, styles)
+        if bool(guess["suspected"]) != bool(criteria["suspected_heading_level1"]):
+            return None
+    if node.get("kind") == "paragraph":
+        return _paragraph_query_summary(bundle_dir, manifest, node_id, node, bool(criteria.get("include_runs", True)))
+    return _run_query_summary(bundle_dir, manifest, node_id, node)
+
+
+def _query_text_matches(nodes: dict[str, Any], node_id: str, node: dict[str, Any], criteria: dict[str, Any]) -> bool:
+    text = _node_visible_text(nodes, node_id, node)
+    expected = criteria.get("text")
+    if expected is not None and str(expected) not in text:
+        return False
+    pattern = criteria.get("text_regex")
+    if pattern is not None and re.search(str(pattern), text) is None:
+        return False
+    return True
+
+
+def _query_paragraph_matches(manifest: dict[str, Any], node_id: str, node: dict[str, Any], criteria: dict[str, Any]) -> bool:
+    nodes = manifest.get("nodes", {})
+    paragraph_id = node_id if node.get("kind") == "paragraph" else node.get("parent")
+    paragraph = nodes.get(paragraph_id or "")
+    if paragraph is None:
+        return not any(key in criteria for key in ("style_id", "align", "line_spacing", "space_before", "space_after"))
+    if "style_id" in criteria and str(paragraph.get("styleId") or "") != str(criteria["style_id"]):
+        return False
+    props = _effective_paragraph_properties(manifest.get("styles", {}), paragraph)
+    for criteria_key, prop_key in (
+        ("align", "align"),
+        ("line_spacing", "line-spacing"),
+        ("space_before", "space-before"),
+        ("space_after", "space-after"),
+    ):
+        if criteria_key in criteria and not _query_value_equal(props.get(prop_key), criteria[criteria_key]):
+            return False
+    return True
+
+
+def _query_run_properties_match(manifest: dict[str, Any], node_id: str, node: dict[str, Any], criteria: dict[str, Any]) -> bool:
+    if not any(key in criteria for key in ("font_family", "east_asia_font", "font_size", "bold", "italic", "color")):
+        return True
+    nodes = manifest.get("nodes", {})
+    styles = manifest.get("styles", {})
+    if node.get("kind") == "run":
+        parent = nodes.get(node.get("parent", ""))
+        props = _effective_run_properties(styles, node, parent)
+        return _run_properties_match_criteria(props, criteria)
+    if node.get("kind") != "paragraph":
+        return False
+    return bool(_matching_runs_for_paragraph(manifest, node_id, node, criteria))
+
+
+def _matching_runs_for_paragraph(manifest: dict[str, Any], node_id: str, paragraph: dict[str, Any], criteria: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = manifest.get("nodes", {})
+    styles = manifest.get("styles", {})
+    matched: list[dict[str, Any]] = []
+    for run_id in paragraph.get("children", []):
+        run = nodes.get(run_id)
+        if run is None or run.get("kind") != "run":
+            continue
+        props = _effective_run_properties(styles, run, paragraph)
+        if _run_properties_match_criteria(props, criteria):
+            matched.append(_node_summary(run_id, run))
+    if matched:
+        return matched
+    style_props = _style_effective_properties(styles, paragraph.get("styleId"), "runProperties")
+    if style_props and _run_properties_match_criteria(style_props, criteria):
+        return [{"nodeId": node_id, "kind": "paragraph-style-runProperties", "properties": style_props}]
+    return []
+
+
+def _run_properties_match_criteria(props: dict[str, Any], criteria: dict[str, Any]) -> bool:
+    if "font_family" in criteria and not _font_value_matches(props, str(criteria["font_family"])):
+        return False
+    if "east_asia_font" in criteria and not _query_value_equal(props.get("east-asia-font"), criteria["east_asia_font"]):
+        return False
+    if "font_size" in criteria and not _query_value_equal(_normalize_query_pt(props.get("font-size")), criteria["font_size"]):
+        return False
+    if "bold" in criteria and _prop_bool(props.get("bold")) != bool(criteria["bold"]):
+        return False
+    if "italic" in criteria and _prop_bool(props.get("italic")) != bool(criteria["italic"]):
+        return False
+    if "color" in criteria and not _query_value_equal(props.get("color"), criteria["color"]):
+        return False
+    return True
+
+
+def _font_value_matches(props: dict[str, Any], expected: str) -> bool:
+    expected_folded = expected.casefold()
+    values = [
+        props.get("font-family"),
+        props.get("ascii-font"),
+        props.get("hansi-font"),
+        props.get("east-asia-font"),
+        props.get("cs-font"),
+    ]
+    return any(isinstance(value, str) and value.casefold() == expected_folded for value in values)
+
+
+def _query_value_equal(left: Any, right: Any) -> bool:
+    if left is None:
+        return False
+    return str(left).strip().casefold() == str(right).strip().casefold()
+
+
+def _normalize_query_pt(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return f"{float(value):g}pt"
+    text = str(value).strip()
+    if not text:
+        return text
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return f"{float(text):g}pt"
+    return text
+
+
+def _prop_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _node_visible_text(nodes: dict[str, Any], node_id: str, node: dict[str, Any]) -> str:
+    if node.get("kind") == "paragraph":
+        return _paragraph_visible_text(nodes, node_id, node)
+    return str(node.get("text") or "")
+
+
+def _paragraph_visible_text(nodes: dict[str, Any], node_id: str, paragraph: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    for child_id in paragraph.get("children", []):
+        child = nodes.get(child_id, {})
+        if child.get("kind") in {"run", "protected"}:
+            chunks.append(str(child.get("text") or ""))
+    return "".join(chunks)
+
+
+def _node_has_image(nodes: dict[str, Any], node_id: str, node: dict[str, Any]) -> bool:
+    if node.get("kind") == "run":
+        return node.get("objectKind") == "drawing"
+    if node.get("kind") != "paragraph":
+        return False
+    return any(nodes.get(child_id, {}).get("objectKind") == "drawing" for child_id in node.get("children", []))
+
+
+def _effective_paragraph_properties(styles: dict[str, Any], paragraph: dict[str, Any]) -> dict[str, Any]:
+    props = _style_effective_properties(styles, paragraph.get("styleId"), "paragraphProperties")
+    props.update(paragraph.get("properties", {}) or {})
+    return props
+
+
+def _effective_run_properties(styles: dict[str, Any], run: dict[str, Any], paragraph: dict[str, Any] | None) -> dict[str, Any]:
+    props = _style_effective_properties(styles, paragraph.get("styleId") if paragraph else None, "runProperties")
+    props.update(run.get("properties", {}) or {})
+    return props
+
+
+def _style_effective_properties(styles: dict[str, Any], style_id: str | None, property_key: str) -> dict[str, Any]:
+    effective: dict[str, Any] = {}
+    seen: set[str] = set()
+
+    def visit(current_id: str | None) -> None:
+        if not current_id or current_id in seen:
+            return
+        seen.add(current_id)
+        style = styles.get(current_id)
+        if not style:
+            return
+        visit(style.get("basedOn"))
+        effective.update(style.get(property_key, {}) or {})
+
+    visit(style_id)
+    return effective
+
+
+def _paragraph_query_summary(bundle_dir: Path, manifest: dict[str, Any], node_id: str, paragraph: dict[str, Any], include_runs: bool) -> dict[str, Any]:
+    nodes = manifest.get("nodes", {})
+    styles = manifest.get("styles", {})
+    summary = _node_summary(node_id, paragraph)
+    summary["text"] = _paragraph_visible_text(nodes, node_id, paragraph)
+    summary["textPreview"] = _preview_text(summary["text"])
+    summary["effectiveProperties"] = _effective_paragraph_properties(styles, paragraph)
+    summary["hasImage"] = _node_has_image(nodes, node_id, paragraph)
+    summary["imageRuns"] = [
+        _run_query_summary(bundle_dir, manifest, child_id, nodes[child_id])
+        for child_id in paragraph.get("children", [])
+        if nodes.get(child_id, {}).get("objectKind") == "drawing"
+    ]
+    summary["suspectedHeadingLevel1"] = _heading_level1_guess(node_id, paragraph, nodes, styles)
+    if include_runs:
+        summary["runs"] = [
+            _run_query_summary(bundle_dir, manifest, child_id, nodes[child_id])
+            for child_id in paragraph.get("children", [])
+            if nodes.get(child_id, {}).get("kind") == "run"
+        ]
+    return summary
+
+
+def _run_query_summary(bundle_dir: Path, manifest: dict[str, Any], node_id: str, run: dict[str, Any]) -> dict[str, Any]:
+    nodes = manifest.get("nodes", {})
+    styles = manifest.get("styles", {})
+    paragraph = nodes.get(run.get("parent", ""))
+    summary = _node_summary(node_id, run)
+    summary["textPreview"] = _preview_text(str(run.get("text") or ""))
+    summary["effectiveProperties"] = _effective_run_properties(styles, run, paragraph)
+    if paragraph:
+        host = _node_summary(run["parent"], paragraph)
+        host["text"] = _paragraph_visible_text(nodes, run["parent"], paragraph)
+        host["textPreview"] = _preview_text(host["text"])
+        host["effectiveProperties"] = _effective_paragraph_properties(styles, paragraph)
+        host["lineSpacingRule"] = _paragraph_line_spacing_rule(bundle_dir, paragraph)
+        summary["hostParagraph"] = host
+    return summary
+
+
+def _preview_text(text: str, limit: int = 120) -> str:
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1] + "..."
+
+
+def _heading_level1_guess(node_id: str, paragraph: dict[str, Any], nodes: dict[str, Any], styles: dict[str, Any]) -> dict[str, Any]:
+    if paragraph.get("kind") != "paragraph":
+        return {"suspected": False, "score": 0, "reasons": []}
+    reasons: list[str] = []
+    score = 0
+    style_id = str(paragraph.get("styleId") or "")
+    style = styles.get(style_id, {})
+    style_name = str(style.get("name") or "")
+    style_text = f"{style_id} {style_name}".casefold().replace(" ", "")
+    if any(marker in style_text for marker in ("heading1", "标题1", "title1")):
+        reasons.append("style-level-1")
+        score += 4
+    paragraph_props = _effective_paragraph_properties(styles, paragraph)
+    if paragraph_props.get("align") == "center":
+        reasons.append("centered")
+        score += 1
+    run_props = _paragraph_effective_run_props_for_heading(paragraph, nodes, styles)
+    max_size = max((_pt_number(props.get("font-size")) or 0 for props in run_props), default=0)
+    if max_size >= 14:
+        reasons.append(f"large-font-{max_size:g}pt")
+        score += 1
+    if any(_prop_bool(props.get("bold")) for props in run_props):
+        reasons.append("bold")
+        score += 1
+    if any(_looks_like_heading_font(props) for props in run_props):
+        reasons.append("heading-font")
+        score += 1
+    numbering = paragraph.get("numbering", {}) or {}
+    if str(numbering.get("ilvl", "")) == "0":
+        reasons.append("top-level-numbering")
+        score += 1
+    text = _paragraph_visible_text(nodes, node_id, paragraph)
+    if 0 < len(text.strip()) <= 80:
+        reasons.append("short-text")
+        score += 1
+    suspected = score >= 3 or "style-level-1" in reasons
+    return {"suspected": suspected, "score": score, "reasons": reasons}
+
+
+def _paragraph_effective_run_props_for_heading(paragraph: dict[str, Any], nodes: dict[str, Any], styles: dict[str, Any]) -> list[dict[str, Any]]:
+    props: list[dict[str, Any]] = []
+    for run_id in paragraph.get("children", []):
+        run = nodes.get(run_id, {})
+        if run.get("kind") == "run":
+            props.append(_effective_run_properties(styles, run, paragraph))
+    if props:
+        return props
+    style_props = _style_effective_properties(styles, paragraph.get("styleId"), "runProperties")
+    return [style_props] if style_props else []
+
+
+def _looks_like_heading_font(props: dict[str, Any]) -> bool:
+    values = " ".join(str(props.get(key, "")) for key in ("font-family", "ascii-font", "hansi-font", "east-asia-font", "cs-font")).casefold()
+    return any(marker in values for marker in ("黑体", "simhei", "hei", "heiti", "bold"))
+
+
+def _pt_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*pt\s*", str(value), flags=re.IGNORECASE)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def _normalize_assertions(assertions: list[Any] | None) -> list[dict[str, Any]]:
+    raw_assertions = assertions if assertions else [{"type": "text-payload-unchanged"}]
+    normalized: list[dict[str, Any]] = []
+    for assertion in raw_assertions:
+        if isinstance(assertion, str):
+            normalized.append({"type": assertion})
+        elif isinstance(assertion, dict):
+            normalized.append(assertion)
+        else:
+            normalized.append({"type": "invalid", "value": assertion})
+    return normalized
+
+
+def _assertion_after_apply(assertion: dict[str, Any]) -> bool:
+    return bool(
+        assertion.get("afterApply")
+        or assertion.get("after_apply")
+        or assertion.get("plannedOutput")
+        or assertion.get("planned_output")
+    )
+
+
+def _planned_assertion_context(bundle_dir: Path, original_manifest: dict[str, Any]) -> dict[str, Any]:
+    scratch = bundle_dir / ".hdocx-assert-after-apply"
+    ensure_new_dir(scratch, force=True)
+    planned_docx = scratch / "planned-output.docx"
+    planned_bundle = scratch / "planned-output.hdocx"
+    apply_hdocx(bundle_dir, planned_docx)
+    export_docx(planned_docx, planned_bundle, force=True)
+    planned_manifest = _load_manifest(planned_bundle)
+    return {
+        "docx": planned_docx,
+        "bundle": planned_bundle,
+        "manifest": planned_manifest,
+        "nodeIdMap": _map_nodes_between_manifests(original_manifest, planned_manifest),
+    }
+
+
+def _translate_assertion_for_planned_output(assertion: dict[str, Any], node_id_map: dict[str, str]) -> dict[str, Any]:
+    translated = copy.deepcopy(assertion)
+    translations: dict[str, str] = {}
+    for key in ("paragraphIds", "paragraph_ids"):
+        value = translated.get(key)
+        if not isinstance(value, list):
+            continue
+        translated_ids: list[Any] = []
+        for item in value:
+            original_id = str(item)
+            planned_id = node_id_map.get(original_id, original_id)
+            translated_ids.append(planned_id)
+            if planned_id != original_id:
+                translations[original_id] = planned_id
+        translated[key] = translated_ids
+    if translations:
+        translated["nodeIdTranslations"] = translations
+    return translated
+
+
+def _map_nodes_between_manifests(left_manifest: dict[str, Any], right_manifest: dict[str, Any]) -> dict[str, str]:
+    left_nodes = left_manifest.get("nodes", {})
+    right_nodes = right_manifest.get("nodes", {})
+    right_buckets: dict[tuple[Any, ...], list[str]] = {}
+    for node_id, node in sorted(right_nodes.items(), key=lambda item: _node_sort_key(right_nodes, item[0])):
+        signature = _node_mapping_signature(right_nodes, node_id, node)
+        if signature is not None:
+            right_buckets.setdefault(signature, []).append(node_id)
+    mapping: dict[str, str] = {}
+    for node_id, node in sorted(left_nodes.items(), key=lambda item: _node_sort_key(left_nodes, item[0])):
+        signature = _node_mapping_signature(left_nodes, node_id, node)
+        if signature is None:
+            continue
+        candidates = right_buckets.get(signature, [])
+        if candidates:
+            mapping[node_id] = candidates.pop(0)
+    return mapping
+
+
+def _node_mapping_signature(nodes: dict[str, Any], node_id: str, node: dict[str, Any]) -> tuple[Any, ...] | None:
+    kind = node.get("kind")
+    if kind == "paragraph":
+        return (
+            "paragraph",
+            node.get("partPath"),
+            _paragraph_visible_text(nodes, node_id, node),
+            _node_has_image(nodes, node_id, node),
+        )
+    if kind == "run":
+        return (
+            "run",
+            node.get("partPath"),
+            str(node.get("text") or ""),
+            node.get("objectKind"),
+        )
+    return None
+
+
+def _run_assertion(bundle_dir: Path, manifest: dict[str, Any], assertion: dict[str, Any]) -> dict[str, Any]:
+    assertion_type = _normalize_assertion_type(str(assertion.get("type", "")))
+    if assertion_type not in ASSERTION_TYPES:
+        return {
+            "type": assertion.get("type"),
+            "passed": False,
+            "code": "ASSERTION_UNSUPPORTED",
+            "message": "Unsupported assertion type.",
+            "supportedTypes": list(ASSERTION_TYPES),
+        }
+    if assertion_type == "text-payload-unchanged":
+        return _assert_text_payload_unchanged(bundle_dir, assertion_type)
+    if assertion_type == "paragraphs-have-empty-before":
+        return _assert_paragraphs_have_empty_neighbor(manifest, assertion, assertion_type, "before")
+    if assertion_type == "paragraphs-have-empty-after":
+        return _assert_paragraphs_have_empty_neighbor(manifest, assertion, assertion_type, "after")
+    if assertion_type == "images-host-paragraph-not-exact-line-spacing":
+        return _assert_images_host_paragraph_not_exact_line_spacing(bundle_dir, manifest, assertion_type)
+    if assertion_type == "level1-headings-have-empty-paragraph-before":
+        return _assert_level1_headings_have_empty_before(manifest, assertion, assertion_type)
+    raise AssertionError(assertion_type)
+
+
+def _normalize_assertion_type(assertion_type: str) -> str:
+    normalized = assertion_type.strip().lower().replace("_", "-")
+    aliases = {
+        "text-unchanged": "text-payload-unchanged",
+        "no-text-change": "text-payload-unchanged",
+        "paragraph-empty-before": "paragraphs-have-empty-before",
+        "paragraph-empty-after": "paragraphs-have-empty-after",
+        "images-no-exact-line-spacing": "images-host-paragraph-not-exact-line-spacing",
+        "image-host-not-exact": "images-host-paragraph-not-exact-line-spacing",
+        "level1-empty-before": "level1-headings-have-empty-paragraph-before",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _assert_text_payload_unchanged(bundle_dir: Path, assertion_type: str) -> dict[str, Any]:
+    analysis = _analyze_edits(bundle_dir)
+    text_patches = [
+        patch
+        for patch in analysis.get("patches", [])
+        if ("newText" in patch and patch.get("newText") != patch.get("oldText")) or patch.get("operation") == "patch-comment-text"
+    ]
+    failures = [
+        {
+            "patchId": patch.get("id"),
+            "operation": patch.get("operation"),
+            "nodeId": patch.get("nodeId"),
+            "oldTextPreview": _preview_text(str(patch.get("oldText", ""))),
+            "newTextPreview": _preview_text(str(patch.get("newText", ""))),
+        }
+        for patch in text_patches
+    ]
+    errors = analysis.get("errors", [])
+    return {
+        "type": assertion_type,
+        "passed": not failures and not errors,
+        "checkedPatchCount": len(analysis.get("patches", [])),
+        "failures": failures,
+        "errors": errors,
+    }
+
+
+def _assert_text_payload_unchanged_after_apply(
+    original_manifest: dict[str, Any],
+    planned_manifest: dict[str, Any],
+    assertion_type: str,
+) -> dict[str, Any]:
+    original_payload = _manifest_text_payload(original_manifest)
+    planned_payload = _manifest_text_payload(planned_manifest)
+    failures: list[dict[str, Any]] = []
+    if original_payload != planned_payload:
+        first_difference = _first_sequence_difference(original_payload, planned_payload)
+        failures.append(
+            {
+                "reason": "text-payload-differs-after-apply",
+                "originalTextItemCount": len(original_payload),
+                "plannedTextItemCount": len(planned_payload),
+                "firstDifference": first_difference,
+            }
+        )
+    return {
+        "type": assertion_type,
+        "passed": not failures,
+        "checkedOriginalTextItemCount": len(original_payload),
+        "checkedPlannedTextItemCount": len(planned_payload),
+        "failures": failures,
+    }
+
+
+def _manifest_text_payload(manifest: dict[str, Any]) -> list[str]:
+    nodes = manifest.get("nodes", {})
+    payload: list[str] = []
+    for _node_id, node in sorted(nodes.items(), key=lambda item: _node_sort_key(nodes, item[0])):
+        if node.get("kind") in {"run", "protected"}:
+            text = str(node.get("text") or "")
+            if text:
+                payload.append(text)
+    return payload
+
+
+def _first_sequence_difference(left: list[str], right: list[str]) -> dict[str, Any] | None:
+    for index, (left_item, right_item) in enumerate(zip(left, right)):
+        if left_item != right_item:
+            return {
+                "index": index,
+                "original": _preview_text(left_item),
+                "planned": _preview_text(right_item),
+            }
+    if len(left) != len(right):
+        index = min(len(left), len(right))
+        return {
+            "index": index,
+            "original": _preview_text(left[index]) if index < len(left) else None,
+            "planned": _preview_text(right[index]) if index < len(right) else None,
+        }
+    return None
+
+
+def _assert_paragraphs_have_empty_neighbor(manifest: dict[str, Any], assertion: dict[str, Any], assertion_type: str, direction: str) -> dict[str, Any]:
+    nodes = manifest.get("nodes", {})
+    paragraph_ids = [str(value) for value in assertion.get("paragraphIds", assertion.get("paragraph_ids", []))]
+    failures: list[dict[str, Any]] = []
+    if not paragraph_ids:
+        return {
+            "type": assertion_type,
+            "passed": False,
+            "code": "ASSERTION_MISSING_PARAGRAPH_IDS",
+            "message": "paragraphIds is required for this assertion.",
+            "failures": [],
+        }
+    for paragraph_id in paragraph_ids:
+        paragraph = nodes.get(paragraph_id)
+        if paragraph is None or paragraph.get("kind") != "paragraph":
+            failures.append({"nodeId": paragraph_id, "reason": "paragraph-not-found"})
+            continue
+        neighbor_id = _neighbor_paragraph_id(nodes, paragraph_id, direction)
+        neighbor = nodes.get(neighbor_id or "")
+        if neighbor is None or not _is_empty_projected_paragraph(nodes, neighbor):
+            failures.append({"nodeId": paragraph_id, "neighborId": neighbor_id, "reason": f"empty-paragraph-{direction}-missing"})
+    return {
+        "type": assertion_type,
+        "passed": not failures,
+        "checkedParagraphIds": paragraph_ids,
+        "failures": failures,
+    }
+
+
+def _assert_images_host_paragraph_not_exact_line_spacing(bundle_dir: Path, manifest: dict[str, Any], assertion_type: str) -> dict[str, Any]:
+    nodes = manifest.get("nodes", {})
+    failures: list[dict[str, Any]] = []
+    checked: list[dict[str, Any]] = []
+    for run_id, run in sorted(nodes.items(), key=lambda item: _node_sort_key(nodes, item[0])):
+        if run.get("kind") != "run" or run.get("objectKind") != "drawing":
+            continue
+        paragraph_id = run.get("parent")
+        paragraph = nodes.get(paragraph_id or "")
+        rule = _paragraph_line_spacing_rule(bundle_dir, paragraph or {})
+        checked.append({"imageRunId": run_id, "hostParagraphId": paragraph_id, "lineSpacingRule": rule})
+        if rule.get("lineRule") == "exact":
+            failures.append({"imageRunId": run_id, "hostParagraphId": paragraph_id, "lineSpacingRule": rule})
+    return {
+        "type": assertion_type,
+        "passed": not failures,
+        "checkedImageCount": len(checked),
+        "checkedImages": checked,
+        "failures": failures,
+    }
+
+
+def _assert_level1_headings_have_empty_before(manifest: dict[str, Any], assertion: dict[str, Any], assertion_type: str) -> dict[str, Any]:
+    nodes = manifest.get("nodes", {})
+    styles = manifest.get("styles", {})
+    min_score = int(assertion.get("minScore", assertion.get("min_score", 3)))
+    allow_first = bool(assertion.get("allowFirstInPart", assertion.get("allow_first_in_part", True)))
+    explicit_paragraph_ids = [str(value) for value in assertion.get("paragraphIds", assertion.get("paragraph_ids", []))]
+    regexes = _level1_assertion_regexes(assertion)
+    if regexes.get("error"):
+        return {
+            "type": assertion_type,
+            "passed": False,
+            "code": "ASSERTION_INVALID_REGEX",
+            "message": "includeRegex or excludeRegex is invalid.",
+            "error": regexes["error"],
+            "failures": [],
+        }
+    headings: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    candidates: list[tuple[str, dict[str, Any]]]
+    if explicit_paragraph_ids:
+        candidates = [(paragraph_id, nodes.get(paragraph_id, {})) for paragraph_id in explicit_paragraph_ids]
+    else:
+        candidates = [
+            (paragraph_id, paragraph)
+            for paragraph_id, paragraph in sorted(nodes.items(), key=lambda item: _node_sort_key(nodes, item[0]))
+            if paragraph.get("kind") == "paragraph"
+        ]
+    for paragraph_id, paragraph in candidates:
+        if paragraph.get("kind") != "paragraph":
+            failures.append({"nodeId": paragraph_id, "reason": "paragraph-not-found"})
+            continue
+        guess = _heading_level1_guess(paragraph_id, paragraph, nodes, styles)
+        text = _paragraph_visible_text(nodes, paragraph_id, paragraph)
+        if not explicit_paragraph_ids and (not guess["suspected"] or int(guess["score"]) < min_score):
+            continue
+        skip_reason = None if explicit_paragraph_ids else _level1_assertion_skip_reason(text, regexes)
+        if skip_reason:
+            skipped.append({"nodeId": paragraph_id, "textPreview": _preview_text(text), "guess": guess, "reason": skip_reason})
+            continue
+        neighbor_id = _neighbor_paragraph_id(nodes, paragraph_id, "before")
+        if neighbor_id is None and allow_first:
+            skipped.append({"nodeId": paragraph_id, "textPreview": _preview_text(text), "guess": guess, "reason": "first-in-part-allowed"})
+            continue
+        headings.append({"nodeId": paragraph_id, "textPreview": _preview_text(text), "guess": guess, "previousParagraphId": neighbor_id})
+        neighbor = nodes.get(neighbor_id or "")
+        if neighbor is None or not _is_empty_projected_paragraph(nodes, neighbor):
+            failures.append({"nodeId": paragraph_id, "previousParagraphId": neighbor_id, "reason": "empty-paragraph-before-missing", "guess": guess})
+    return {
+        "type": assertion_type,
+        "passed": not failures,
+        "checkedHeadingCount": len(headings),
+        "explicitParagraphIds": explicit_paragraph_ids,
+        "criteria": {
+            "minScore": min_score,
+            "allowFirstInPart": allow_first,
+            "includeRegex": regexes.get("includePattern"),
+            "excludeRegex": regexes.get("excludePattern"),
+            "useDefaultExcludes": regexes.get("useDefaultExcludes"),
+            "defaultExcludeRegex": regexes.get("defaultExcludePattern"),
+        },
+        "headings": headings,
+        "skippedHeadings": skipped,
+        "failures": failures,
+    }
+
+
+def _level1_assertion_regexes(assertion: dict[str, Any]) -> dict[str, Any]:
+    include_pattern = assertion.get("includeRegex", assertion.get("include_regex"))
+    exclude_pattern = assertion.get("excludeRegex", assertion.get("exclude_regex"))
+    use_default_excludes = bool(assertion.get("useDefaultExcludes", assertion.get("use_default_excludes", True)))
+    result: dict[str, Any] = {
+        "includePattern": include_pattern,
+        "excludePattern": exclude_pattern,
+        "defaultExcludePattern": DEFAULT_LEVEL1_HEADING_EXCLUDE_REGEX if use_default_excludes else None,
+        "useDefaultExcludes": use_default_excludes,
+    }
+    try:
+        if include_pattern:
+            result["include"] = re.compile(str(include_pattern), flags=re.IGNORECASE)
+        if exclude_pattern:
+            result["exclude"] = re.compile(str(exclude_pattern), flags=re.IGNORECASE)
+        if use_default_excludes:
+            result["defaultExclude"] = re.compile(DEFAULT_LEVEL1_HEADING_EXCLUDE_REGEX, flags=re.IGNORECASE)
+    except re.error as exc:
+        result["error"] = {"pattern": include_pattern or exclude_pattern, "reason": str(exc)}
+    return result
+
+
+def _level1_assertion_skip_reason(text: str, regexes: dict[str, Any]) -> str | None:
+    include_regex = regexes.get("include")
+    if include_regex is not None and include_regex.search(text) is None:
+        return "include-regex-mismatch"
+    exclude_regex = regexes.get("exclude")
+    if exclude_regex is not None and exclude_regex.search(text) is not None:
+        return "exclude-regex-match"
+    default_exclude_regex = regexes.get("defaultExclude")
+    if default_exclude_regex is not None and default_exclude_regex.search(text) is not None:
+        return "default-exclude-regex-match"
+    return None
+
+
+def _neighbor_paragraph_id(nodes: dict[str, Any], paragraph_id: str, direction: str) -> str | None:
+    paragraph = nodes.get(paragraph_id)
+    if paragraph is None:
+        return None
+    locator = paragraph.get("locator") or {}
+    paragraph_index = locator.get("paragraphIndex")
+    part_path = paragraph.get("partPath")
+    if paragraph_index is None or part_path is None:
+        return None
+    target_index = paragraph_index - 1 if direction == "before" else paragraph_index + 1
+    for candidate_id, candidate in nodes.items():
+        candidate_locator = candidate.get("locator") or {}
+        if candidate.get("kind") == "paragraph" and candidate.get("partPath") == part_path and candidate_locator.get("paragraphIndex") == target_index:
+            return candidate_id
+    return None
+
+
+def _is_empty_projected_paragraph(nodes: dict[str, Any], paragraph: dict[str, Any]) -> bool:
+    if paragraph.get("kind") != "paragraph":
+        return False
+    for child_id in paragraph.get("children", []):
+        child = nodes.get(child_id, {})
+        if child.get("objectKind") == "drawing":
+            return False
+        if child.get("protectedKind"):
+            return False
+        if str(child.get("text") or ""):
+            return False
+    return True
+
+
+def _paragraph_line_spacing_rule(bundle_dir: Path, paragraph: dict[str, Any]) -> dict[str, Any]:
+    locator = paragraph.get("locator") or {}
+    paragraph_index = locator.get("paragraphIndex")
+    part_path = paragraph.get("partPath")
+    if paragraph_index is None or not part_path:
+        return {"available": False, "reason": "paragraph-locator-missing"}
+    xml_path = bundle_dir / "parts" / part_path.lstrip("/")
+    if not xml_path.exists():
+        return {"available": False, "reason": "part-missing", "partPath": part_path}
+    try:
+        root = ET.parse(xml_path).getroot()
+    except ET.ParseError as exc:
+        return {"available": False, "reason": "xml-parse-error", "partPath": part_path, "message": str(exc)}
+    paragraphs = root.findall(".//w:p", NS)
+    if paragraph_index < 1 or paragraph_index > len(paragraphs):
+        return {"available": False, "reason": "paragraph-index-out-of-range", "partPath": part_path, "paragraphIndex": paragraph_index}
+    spacing = paragraphs[paragraph_index - 1].find("w:pPr/w:spacing", NS)
+    if spacing is None:
+        return {"available": True, "lineRule": None, "line": None}
+    return {
+        "available": True,
+        "lineRule": spacing.attrib.get(_tag("lineRule")) or "auto",
+        "line": spacing.attrib.get(_tag("line")),
+        "before": spacing.attrib.get(_tag("before")),
+        "after": spacing.attrib.get(_tag("after")),
+    }
+
+
 def _diff_summary(diff: dict[str, Any], byte_identical: bool) -> dict[str, Any]:
     counts = diff.get("entryCounts", {})
     return {
@@ -824,6 +1984,9 @@ def _patch_risk_class(operation: str) -> str:
         "delete-table-row",
         "insert-table-column-after",
         "delete-table-column",
+        "insert-manual-page-break-before",
+        "insert-empty-paragraph-before",
+        "insert-empty-paragraph-after",
         "patch-comment-text",
         "patch-revision-action",
         "patch-equation-omml",
@@ -865,6 +2028,10 @@ def _semantic_diff_docx(left_docx: Path, right_docx: Path) -> dict[str, Any]:
     try:
         _, left_nodes = project_docx_entries(_read_docx_entry_bytes(left_docx))
         _, right_nodes = project_docx_entries(_read_docx_entry_bytes(right_docx))
+        alignment = _manual_page_break_semantic_alignment(left_docx, right_docx, left_nodes, right_nodes)
+        if alignment.get("applied"):
+            left_nodes = alignment["leftNodes"]
+            right_nodes = alignment["rightNodes"]
     except Exception as exc:
         return {
             "available": False,
@@ -883,7 +2050,7 @@ def _semantic_diff_docx(left_docx: Path, right_docx: Path) -> dict[str, Any]:
     ]
     left_only = sorted(left_ids - right_ids, key=lambda item: _node_sort_key(left_nodes, item))
     right_only = sorted(right_ids - left_ids, key=lambda item: _node_sort_key(right_nodes, item))
-    return {
+    result = {
         "available": True,
         "identical": not changed and not left_only and not right_only,
         "nodeCounts": {
@@ -901,6 +2068,131 @@ def _semantic_diff_docx(left_docx: Path, right_docx: Path) -> dict[str, Any]:
         "leftOnlyNodes": [_node_summary(node_id, left_nodes[node_id]) for node_id in left_only],
         "rightOnlyNodes": [_node_summary(node_id, right_nodes[node_id]) for node_id in right_only],
     }
+    if alignment.get("applied"):
+        result.update(alignment.get("reports", {}))
+    return result
+
+
+def _manual_page_break_semantic_alignment(
+    left_docx: Path,
+    right_docx: Path,
+    left_nodes: dict[str, Any],
+    right_nodes: dict[str, Any],
+) -> dict[str, Any]:
+    left_breaks = _manual_page_break_paragraphs(left_docx)
+    right_breaks = _manual_page_break_paragraphs(right_docx)
+    left_empty_paragraphs = _empty_paragraphs(left_docx)
+    right_empty_paragraphs = _empty_paragraphs(right_docx)
+    left_break_indices = {int(item["paragraphIndex"]) for item in left_breaks}
+    right_break_indices = {int(item["paragraphIndex"]) for item in right_breaks}
+    left_empty_indices = {int(item["paragraphIndex"]) for item in left_empty_paragraphs}
+    right_empty_indices = {int(item["paragraphIndex"]) for item in right_empty_paragraphs}
+    if left_break_indices == right_break_indices and left_empty_indices == right_empty_indices:
+        return {"applied": False}
+
+    left_manual_skip = _structural_paragraph_node_ids(left_nodes, left_break_indices)
+    right_manual_skip = _structural_paragraph_node_ids(right_nodes, right_break_indices)
+    left_empty_skip = _structural_paragraph_node_ids(left_nodes, left_empty_indices)
+    right_empty_skip = _structural_paragraph_node_ids(right_nodes, right_empty_indices)
+    left_skip = left_manual_skip | left_empty_skip
+    right_skip = right_manual_skip | right_empty_skip
+    if not left_skip and not right_skip:
+        return {"applied": False}
+
+    left_order = [node_id for node_id in sorted(left_nodes, key=lambda item: _node_sort_key(left_nodes, item)) if node_id not in left_skip]
+    right_order = [node_id for node_id in sorted(right_nodes, key=lambda item: _node_sort_key(right_nodes, item)) if node_id not in right_skip]
+    pair_count = min(len(left_order), len(right_order))
+    right_to_left: dict[str, str] = {}
+    for index in range(pair_count):
+        left_id = left_order[index]
+        right_id = right_order[index]
+        left_node = left_nodes[left_id]
+        right_node = right_nodes[right_id]
+        if left_node.get("kind") != right_node.get("kind") or left_node.get("partPath") != right_node.get("partPath"):
+            return {"applied": False}
+        right_to_left[right_id] = left_id
+
+    aligned_left = {
+        node_id: _drop_structural_children(left_nodes[node_id], left_skip)
+        for node_id in left_order
+    }
+    aligned_right: dict[str, Any] = {}
+    for right_id, left_id in right_to_left.items():
+        aligned_right[left_id] = _remap_semantic_node_for_structural_paragraph(
+            right_nodes[right_id],
+            left_nodes[left_id],
+            right_to_left,
+            right_skip,
+        )
+    for right_id in right_order[pair_count:]:
+        aligned_right[right_id] = right_nodes[right_id]
+
+    return {
+        "applied": True,
+        "leftNodes": aligned_left,
+        "rightNodes": aligned_right,
+        "reports": {
+            "manualPageBreakAlignment": {
+                "strategy": "ignore-manual-page-break-paragraphs",
+                "ignoredLeftBreakParagraphs": len(left_break_indices),
+                "ignoredRightBreakParagraphs": len(right_break_indices),
+                "ignoredLeftNodeIds": sorted(left_manual_skip, key=lambda item: _node_sort_key(left_nodes, item)),
+                "ignoredRightNodeIds": sorted(right_manual_skip, key=lambda item: _node_sort_key(right_nodes, item)),
+            },
+            "emptyParagraphAlignment": {
+                "strategy": "ignore-empty-paragraphs",
+                "ignoredLeftEmptyParagraphs": len(left_empty_indices),
+                "ignoredRightEmptyParagraphs": len(right_empty_indices),
+                "ignoredLeftNodeIds": sorted(left_empty_skip, key=lambda item: _node_sort_key(left_nodes, item)),
+                "ignoredRightNodeIds": sorted(right_empty_skip, key=lambda item: _node_sort_key(right_nodes, item)),
+            },
+        },
+    }
+
+
+def _structural_paragraph_node_ids(nodes: dict[str, Any], paragraph_indices: set[int]) -> set[str]:
+    if not paragraph_indices:
+        return set()
+    paragraph_ids = {
+        node_id
+        for node_id, node in nodes.items()
+        if node.get("kind") == "paragraph" and int((node.get("locator") or {}).get("paragraphIndex") or 0) in paragraph_indices
+    }
+    skipped = set(paragraph_ids)
+    for node_id, node in nodes.items():
+        if node.get("parent") in paragraph_ids:
+            skipped.add(node_id)
+    return skipped
+
+
+def _remap_semantic_node_for_structural_paragraph(
+    right_node: dict[str, Any],
+    left_node: dict[str, Any],
+    right_to_left: dict[str, str],
+    right_skip: set[str],
+) -> dict[str, Any]:
+    remapped = copy.deepcopy(right_node)
+    remapped["locator"] = copy.deepcopy(left_node.get("locator"))
+    parent = remapped.get("parent")
+    if parent in right_to_left:
+        remapped["parent"] = right_to_left[parent]
+    if "children" in remapped:
+        remapped["children"] = [
+            right_to_left.get(child_id, child_id)
+            for child_id in remapped.get("children", [])
+            if child_id not in right_skip
+        ]
+    if all(remapped.get(field) == left_node.get(field) for field in NODE_DIFF_FIELDS):
+        remapped["hash"] = left_node.get("hash")
+    return remapped
+
+
+def _drop_structural_children(node: dict[str, Any], skip: set[str]) -> dict[str, Any]:
+    if "children" not in node or not skip:
+        return node
+    remapped = copy.deepcopy(node)
+    remapped["children"] = [child_id for child_id in remapped.get("children", []) if child_id not in skip]
+    return remapped
 
 
 def _fragment_diff_docx(
@@ -968,6 +2260,220 @@ def _fragment_diff_docx(
         },
         "entries": changed_entries,
     }
+
+
+def _manual_page_break_diff_docx(left_docx: Path, right_docx: Path) -> dict[str, Any]:
+    try:
+        left_breaks = _manual_page_break_paragraphs(left_docx)
+        right_breaks = _manual_page_break_paragraphs(right_docx)
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": {
+                "code": "MANUAL_PAGE_BREAK_DIFF_FAILED",
+                "message": str(exc),
+            },
+        }
+    left_keys = {_manual_break_key(item) for item in left_breaks}
+    right_keys = {_manual_break_key(item) for item in right_breaks}
+    added = [item for item in right_breaks if _manual_break_key(item) not in left_keys]
+    removed = [item for item in left_breaks if _manual_break_key(item) not in right_keys]
+    return {
+        "available": True,
+        "identical": not added and not removed,
+        "summary": {
+            "leftCount": len(left_breaks),
+            "rightCount": len(right_breaks),
+            "added": len(added),
+            "removed": len(removed),
+        },
+        "added": added,
+        "removed": removed,
+    }
+
+
+def _empty_paragraph_diff_docx(left_docx: Path, right_docx: Path) -> dict[str, Any]:
+    try:
+        left_empty = _empty_paragraphs(left_docx)
+        right_empty = _empty_paragraphs(right_docx)
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": {
+                "code": "EMPTY_PARAGRAPH_DIFF_FAILED",
+                "message": str(exc),
+            },
+        }
+    left_keys = {_empty_paragraph_key(item) for item in left_empty}
+    right_keys = {_empty_paragraph_key(item) for item in right_empty}
+    left_by_key = {_empty_paragraph_key(item): item for item in left_empty}
+    right_by_key = {_empty_paragraph_key(item): item for item in right_empty}
+    added = [item for item in right_empty if _empty_paragraph_key(item) not in left_keys]
+    removed = [item for item in left_empty if _empty_paragraph_key(item) not in right_keys]
+    changed = []
+    for key in sorted(left_keys & right_keys):
+        left_item = left_by_key[key]
+        right_item = right_by_key[key]
+        property_changes = _dict_value_changes(left_item.get("properties", {}), right_item.get("properties", {}))
+        if property_changes:
+            changed.append(
+                {
+                    "kind": "empty-paragraph",
+                    "paragraphIndex": right_item.get("paragraphIndex"),
+                    "afterParagraphTextPreview": right_item.get("afterParagraphTextPreview", ""),
+                    "beforeParagraphTextPreview": right_item.get("beforeParagraphTextPreview", ""),
+                    "propertyChanges": property_changes,
+                }
+            )
+    return {
+        "available": True,
+        "identical": not added and not removed and not changed,
+        "summary": {
+            "leftCount": len(left_empty),
+            "rightCount": len(right_empty),
+            "added": len(added),
+            "removed": len(removed),
+            "changed": len(changed),
+        },
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+    }
+
+
+def _empty_paragraphs(docx_path: Path) -> list[dict[str, Any]]:
+    entries = _read_docx_entry_bytes(docx_path)
+    document_xml = entries.get("word/document.xml")
+    if document_xml is None:
+        return []
+    root = ET.fromstring(document_xml)
+    paragraphs = root.findall(".//w:p", NS)
+    result: list[dict[str, Any]] = []
+    for index, paragraph in enumerate(paragraphs, start=1):
+        if not _is_empty_paragraph_xml(paragraph):
+            continue
+        previous_text = _paragraph_text(paragraphs[index - 2]) if index > 1 else ""
+        next_text = _paragraph_text(paragraphs[index]) if index < len(paragraphs) else ""
+        result.append(
+            {
+                "paragraphIndex": index,
+                "kind": "empty-paragraph",
+                "afterParagraphTextPreview": previous_text[:80],
+                "beforeParagraphTextPreview": next_text[:80],
+                "properties": _paragraph_spacing_properties_xml(paragraph),
+            }
+        )
+    return result
+
+
+def _manual_page_break_paragraphs(docx_path: Path) -> list[dict[str, Any]]:
+    entries = _read_docx_entry_bytes(docx_path)
+    document_xml = entries.get("word/document.xml")
+    if document_xml is None:
+        return []
+    root = ET.fromstring(document_xml)
+    paragraphs = root.findall(".//w:p", NS)
+    result: list[dict[str, Any]] = []
+    for index, paragraph in enumerate(paragraphs, start=1):
+        if not _is_manual_page_break_paragraph_xml(paragraph):
+            continue
+        next_text = _paragraph_text(paragraphs[index]) if index < len(paragraphs) else ""
+        result.append(
+            {
+                "paragraphIndex": index,
+                "kind": "manual-page-break",
+                "beforeParagraphTextPreview": next_text[:80],
+            }
+        )
+    return result
+
+
+def _manual_break_key(item: dict[str, Any]) -> tuple[str, str]:
+    return (str(item.get("kind", "")), str(item.get("beforeParagraphTextPreview", "")))
+
+
+def _empty_paragraph_key(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(item.get("kind", "")),
+        str(item.get("afterParagraphTextPreview", "")),
+        str(item.get("beforeParagraphTextPreview", "")),
+    )
+
+
+def _dict_value_changes(left: dict[str, Any], right: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    changes: dict[str, dict[str, Any]] = {}
+    for key in sorted(set(left) | set(right)):
+        if left.get(key) != right.get(key):
+            changes[key] = {"left": left.get(key), "right": right.get(key)}
+    return changes
+
+
+def _is_empty_paragraph_xml(paragraph: ET.Element) -> bool:
+    if paragraph.tag != _tag("p"):
+        return False
+    if _is_manual_page_break_paragraph_xml(paragraph):
+        return False
+    if any((text_node.text or "") for text_node in paragraph.findall(".//w:t", NS)):
+        return False
+    if paragraph.findall(".//w:drawing", NS):
+        return False
+    if paragraph.findall(".//w:br", NS):
+        return False
+    return True
+
+
+def _paragraph_spacing_properties_xml(paragraph: ET.Element) -> dict[str, str]:
+    props: dict[str, str] = {}
+    p_pr = paragraph.find("w:pPr", NS)
+    if p_pr is None:
+        return props
+    p_style = p_pr.find("w:pStyle", NS)
+    if p_style is not None and p_style.attrib.get(_tag("val")):
+        props["style-id"] = p_style.attrib[_tag("val")]
+    spacing = p_pr.find("w:spacing", NS)
+    if spacing is not None:
+        before = spacing.attrib.get(_tag("before"))
+        before_lines = spacing.attrib.get(_tag("beforeLines"))
+        if before and before.isdigit():
+            props["space-before"] = f"{int(before) / 20:g}pt"
+        elif before_lines and before_lines.isdigit():
+            props["space-before"] = f"{int(before_lines) / 100:g}line"
+        after = spacing.attrib.get(_tag("after"))
+        after_lines = spacing.attrib.get(_tag("afterLines"))
+        if after and after.isdigit():
+            props["space-after"] = f"{int(after) / 20:g}pt"
+        elif after_lines and after_lines.isdigit():
+            props["space-after"] = f"{int(after_lines) / 100:g}line"
+        line = spacing.attrib.get(_tag("line"))
+        line_rule = spacing.attrib.get(_tag("lineRule"))
+        if line and line.isdigit():
+            if line_rule in {None, "auto"}:
+                props["line-spacing"] = f"{int(line) / 240:g}"
+            elif line_rule in {"exact", "atLeast"}:
+                props["line-spacing"] = f"{int(line) / 20:g}pt"
+    return props
+
+
+def _is_manual_page_break_paragraph_xml(paragraph: ET.Element) -> bool:
+    meaningful_children = [child for child in list(paragraph) if child.tag != _tag("pPr")]
+    if len(meaningful_children) != 1 or meaningful_children[0].tag != _tag("r"):
+        return False
+    run_children = list(meaningful_children[0])
+    if len(run_children) != 1 or run_children[0].tag != _tag("br"):
+        return False
+    return run_children[0].attrib.get(_tag("type")) == "page"
+
+
+def _paragraph_text(paragraph: ET.Element) -> str:
+    chunks: list[str] = []
+    for text_node in paragraph.findall(".//w:t", NS):
+        chunks.append(text_node.text or "")
+    for br in paragraph.findall(".//w:br", NS):
+        if br.attrib.get(_tag("type")) == "page":
+            chunks.append("[manual-page-break]")
+        else:
+            chunks.append("\n")
+    return "".join(chunks)
 
 
 def _package_diff_kind(package_diff: dict[str, Any], entry_name: str, collection: str) -> str | None:
@@ -1319,6 +2825,18 @@ def _validate_batch_output_paths(input_path: Path, work_dir: Path, output_dir: P
             )
 
 
+def _validate_path_encodable(path: Path, argument: str) -> None:
+    text = str(path)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise HDocxError(
+            "PATH_ENCODING_ERROR",
+            "Path contains characters that cannot be encoded safely.",
+            {"argument": argument, "pathRepr": repr(text)},
+        ) from exc
+
+
 def _path_contains(container: Path, target: Path) -> bool:
     try:
         target.relative_to(container)
@@ -1362,6 +2880,11 @@ body {
 }
 .hlock-protected {
   background: #fff4cc;
+}
+.hdocx-image-preview {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
 }
 """
 
@@ -1887,6 +3410,30 @@ def _normalize_drawing_property(prop_name: str, raw_value: str | None, old_value
     raise ValueError(f"Unsupported drawing property: {prop_name}")
 
 
+def _canonical_image_property_name(prop_name: str) -> str:
+    return prop_name
+
+
+def _canonical_image_paragraph_property_name(prop_name: str) -> str:
+    if not prop_name.startswith(IMAGE_PARAGRAPH_PROPERTY_PREFIX):
+        return prop_name
+    raw = prop_name.removeprefix(IMAGE_PARAGRAPH_PROPERTY_PREFIX)
+    return _canonical_paragraph_property_name(raw)
+
+
+def _normalize_image_hcss_property(prop_name: str, raw_value: str | None, old_value: str | None) -> str | None:
+    value = None if raw_value is None else _strip_hcss_value(raw_value.strip())
+    return _normalize_drawing_property(prop_name, value, old_value)
+
+
+def _image_ooxml_mapping(prop_name: str) -> str:
+    if prop_name == "alt":
+        return "wp:docPr @descr"
+    if prop_name in {"width-emu", "height-emu"}:
+        return "wp:extent @cx/@cy"
+    return OOXML_PROPERTY_MAP.get(prop_name, "drawing metadata")
+
+
 def _diff_paragraph_properties(
     manifest_node: dict[str, Any],
     html_attrs: dict[str, str],
@@ -1978,6 +3525,13 @@ def _canonical_paragraph_property_name(prop_name: str) -> str:
     return PARAGRAPH_PROPERTY_ALIASES.get(
         prop_name,
         PARAGRAPH_PROPERTY_ALIASES.get(prop_name.lower(), prop_name),
+    )
+
+
+def _canonical_empty_paragraph_property_name(prop_name: str) -> str:
+    return EMPTY_PARAGRAPH_PROPERTY_ALIASES.get(
+        prop_name,
+        EMPTY_PARAGRAPH_PROPERTY_ALIASES.get(prop_name.lower(), prop_name),
     )
 
 
@@ -2096,6 +3650,40 @@ def _normalize_paragraph_property(prop_name: str, raw_value: str | None) -> str 
             return f"{lines:g}line"
         raise ValueError(f"{prop_name} must use 0, pt, or line units.")
     raise ValueError(f"Unsupported paragraph property: {prop_name}")
+
+
+def _normalize_empty_paragraph_property(prop_name: str, raw_value: str | None) -> str:
+    raw_prop_name = prop_name
+    prop_name = _canonical_empty_paragraph_property_name(prop_name)
+    if prop_name not in EMPTY_PARAGRAPH_SUPPORTED_PROPERTIES:
+        raise ValueError(f"Unsupported empty paragraph property: {prop_name}")
+    if prop_name == "style-id":
+        value = _strip_hcss_value((raw_value or "").strip())
+        if not value:
+            raise ValueError("empty-paragraph-style-id must not be empty.")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value):
+            raise ValueError("empty-paragraph-style-id must be a simple style id.")
+        return value
+    paragraph_prop = _canonical_paragraph_property_name(prop_name)
+    if paragraph_prop not in {"line-spacing", "space-before", "space-after"}:
+        raise ValueError(f"Unsupported empty paragraph property: {prop_name}")
+    if raw_prop_name in {"line-spacing-exact", "line-spacingExact"} and not _strip_hcss_value(raw_value or "").endswith("pt"):
+        raise ValueError("empty-paragraph-line-spacing-exact must use pt units.")
+    normalized = _normalize_paragraph_property(paragraph_prop, raw_value)
+    if normalized is None:
+        raise ValueError(f"empty-paragraph-{prop_name} must not be empty.")
+    return normalized
+
+
+def _normalize_hcss_bool(prop_name: str, raw_value: str | None) -> str:
+    if raw_value is None or raw_value == "":
+        raise ValueError(f"{prop_name} must be true or false.")
+    value = _strip_hcss_value(raw_value.strip()).lower()
+    if value in {"true", "1", "on", "yes"}:
+        return "true"
+    if value in {"false", "0", "off", "no"}:
+        return "false"
+    raise ValueError(f"{prop_name} must be true or false.")
 
 
 def _compile_hcss_edits(
@@ -2249,6 +3837,14 @@ def _compile_hcss_edits(
             new_errors, new_patches, edit_index = _compile_hcss_paragraph_rule(
                 target_ids, declarations, manifest_nodes, edit_index
             )
+        elif mode == "image-formatting":
+            new_errors, new_patches, edit_index = _compile_hcss_image_formatting_rule(
+                target_ids, declarations, manifest_nodes, edit_index
+            )
+        elif mode == "paragraph-structure":
+            new_errors, new_patches, edit_index = _compile_hcss_paragraph_structure_rule(
+                bundle_dir, target_ids, declarations, manifest_nodes, edit_index
+            )
         elif mode == "all-runs":
             new_errors, new_patches, edit_index = _compile_hcss_all_runs_rule(
                 target_ids, declarations, manifest_nodes, edit_index
@@ -2295,8 +3891,12 @@ def _compile_hcss_edits(
             ]
             new_patches = []
         _annotate_hcss_errors(new_errors, rule_diag["declarations"], rule.get("line"))
+        noops = [patch for patch in new_patches if patch.get("noop")]
+        real_patches = [patch for patch in new_patches if not patch.get("noop")]
+        if noops:
+            rule_diag["noops"] = noops
         errors.extend(new_errors)
-        patches.extend(new_patches)
+        patches.extend(real_patches)
         rule_diag["errors"].extend(new_errors)
         rule_diag["patchIds"] = [patch["id"] for patch in patches[patch_base:]]
         _update_hcss_diagnostics_summary(diagnostics)
@@ -2335,7 +3935,7 @@ def _parse_hcss(text: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     pattern = re.compile(
         r"@hdocx-token\s+([A-Za-z0-9_.-]+)\s+([^;]+);"
         r"|@hdocx-edit\s+mode\(([^)]+)\)\s*;"
-        r"|(@hdocx-set|@hdocx-format)?\s*([A-Za-z0-9_.#\-\[\]=\"/ ]+)\s*\{([^{}]*)\}",
+        r"|\s*(?:(@hdocx-set|@hdocx-format)\s+)?([^{};]+?)\s*\{([^{}]*)\}",
         flags=re.DOTALL,
     )
 
@@ -2542,6 +4142,7 @@ def _hcss_diagnostics_base(*, modified: bool) -> dict[str, Any]:
             "supportedDeclarationCount": 0,
             "unsupportedDeclarationCount": 0,
             "patchCount": 0,
+            "noopCount": 0,
             "errorCount": 0,
         },
     }
@@ -2556,6 +4157,7 @@ def _update_hcss_diagnostics_summary(diagnostics: dict[str, Any]) -> None:
         "supportedDeclarationCount": sum(1 for declaration in declarations if declaration.get("supported")),
         "unsupportedDeclarationCount": sum(1 for declaration in declarations if not declaration.get("supported")),
         "patchCount": sum(len(rule.get("patchIds", [])) for rule in rules),
+        "noopCount": sum(len(rule.get("noops", [])) for rule in rules),
         "errorCount": len(diagnostics.get("parseErrors", []))
         + sum(len(rule.get("errors", [])) for rule in rules),
     }
@@ -2594,6 +4196,107 @@ def _hcss_declaration_diagnostics(
         run_prop = _canonical_run_property_name(raw_prop)
         allowed_paragraph = mode in {"paragraph-formatting", "style-definition", "direct-formatting"}
         allowed_run = mode in {"all-runs", "style-definition", "direct-formatting"}
+        if mode == "image-formatting":
+            image_prop = _canonical_image_property_name(raw_prop)
+            paragraph_image_prop = _canonical_image_paragraph_property_name(raw_prop)
+            if image_prop in IMAGE_FORMATTING_PROPERTIES:
+                try:
+                    normalized = _normalize_image_hcss_property(image_prop, value, old_value="1" if image_prop in {"width-emu", "height-emu"} else "")
+                except ValueError as exc:
+                    diagnostic.update(
+                        {
+                            "normalizedProperty": image_prop,
+                            "reason": str(exc),
+                            "ooxml": _image_ooxml_mapping(image_prop),
+                        }
+                    )
+                else:
+                    diagnostic.update(
+                        {
+                            "supported": True,
+                            "kind": "image-format",
+                            "normalizedProperty": image_prop,
+                            "normalizedValue": normalized,
+                            "ooxml": _image_ooxml_mapping(image_prop),
+                        }
+                    )
+                diagnostics.append(diagnostic)
+                continue
+            if paragraph_image_prop in PARAGRAPH_PROPERTY_ATTRS:
+                try:
+                    if raw_prop in {"paragraph-line-spacing-exact", "paragraph-line-spacingExact"} and not _strip_hcss_value(value).endswith("pt"):
+                        raise ValueError("paragraph-line-spacing-exact must use pt units.")
+                    normalized = _normalize_paragraph_property(paragraph_image_prop, value)
+                except ValueError as exc:
+                    diagnostic.update(
+                        {
+                            "normalizedProperty": f"{IMAGE_PARAGRAPH_PROPERTY_PREFIX}{paragraph_image_prop}",
+                            "reason": str(exc),
+                            "ooxml": OOXML_PROPERTY_MAP.get(paragraph_image_prop),
+                        }
+                    )
+                else:
+                    diagnostic.update(
+                        {
+                            "supported": True,
+                            "kind": "image-paragraph-format",
+                            "normalizedProperty": f"{IMAGE_PARAGRAPH_PROPERTY_PREFIX}{paragraph_image_prop}",
+                            "normalizedValue": normalized,
+                            "ooxml": OOXML_PROPERTY_MAP.get(paragraph_image_prop),
+                        }
+                    )
+                diagnostics.append(diagnostic)
+                continue
+        if (mode == "paragraph-formatting" and raw_prop == "manual-page-break-before") or (
+            mode == "paragraph-structure" and raw_prop in PARAGRAPH_STRUCTURAL_PROPERTIES
+        ):
+            try:
+                normalized = _normalize_hcss_bool(raw_prop, value)
+            except ValueError as exc:
+                diagnostic.update(
+                    {
+                        "normalizedProperty": raw_prop,
+                        "reason": str(exc),
+                        "ooxml": OOXML_PROPERTY_MAP.get(raw_prop),
+                    }
+                )
+            else:
+                diagnostic.update(
+                    {
+                        "supported": True,
+                        "kind": "structural-paragraph",
+                        "normalizedProperty": raw_prop,
+                        "normalizedValue": normalized,
+                        "ooxml": OOXML_PROPERTY_MAP.get(raw_prop),
+                    }
+                )
+            diagnostics.append(diagnostic)
+            continue
+        if mode == "paragraph-structure" and raw_prop.startswith(EMPTY_PARAGRAPH_PROPERTY_PREFIX):
+            raw_empty_prop = raw_prop.removeprefix(EMPTY_PARAGRAPH_PROPERTY_PREFIX)
+            empty_prop = _canonical_empty_paragraph_property_name(raw_empty_prop)
+            try:
+                normalized = _normalize_empty_paragraph_property(raw_empty_prop, value)
+            except ValueError as exc:
+                diagnostic.update(
+                    {
+                        "normalizedProperty": f"{EMPTY_PARAGRAPH_PROPERTY_PREFIX}{empty_prop}",
+                        "reason": str(exc),
+                        "ooxml": OOXML_PROPERTY_MAP.get(f"{EMPTY_PARAGRAPH_PROPERTY_PREFIX}{empty_prop}"),
+                    }
+                )
+            else:
+                diagnostic.update(
+                    {
+                        "supported": True,
+                        "kind": "empty-paragraph-format",
+                        "normalizedProperty": f"{EMPTY_PARAGRAPH_PROPERTY_PREFIX}{empty_prop}",
+                        "normalizedValue": normalized,
+                        "ooxml": OOXML_PROPERTY_MAP.get(f"{EMPTY_PARAGRAPH_PROPERTY_PREFIX}{empty_prop}"),
+                    }
+                )
+            diagnostics.append(diagnostic)
+            continue
         if allowed_paragraph and paragraph_prop in PARAGRAPH_PROPERTY_ATTRS:
             try:
                 if raw_prop in {"line-spacing-exact", "line-spacingExact"} and not _strip_hcss_value(value).endswith("pt"):
@@ -3675,6 +5378,12 @@ def _match_hcss_selector(selector: str | None, html_nodes: dict[str, Any]) -> li
     if not selector:
         return []
     selector = selector.strip()
+    selector_parts = _split_hcss_selector_list(selector)
+    if len(selector_parts) > 1:
+        matched: set[str] = set()
+        for selector_part in selector_parts:
+            matched.update(_match_hcss_selector(selector_part, html_nodes))
+        return sorted(matched)
     if selector in html_nodes:
         return [selector]
     function_match = re.fullmatch(r"([A-Za-z0-9_-]+)\(([^)]*)\)", selector)
@@ -3706,6 +5415,8 @@ def _match_hcss_selector_function(function_name: str, raw_args: str, html_nodes:
     args = [_strip_hcss_value(arg.strip()) for arg in raw_args.split(",") if arg.strip()]
     name = function_name.lower()
     matched: list[str] = []
+    if name == "id" and len(args) == 1:
+        return [args[0]] if args[0] in html_nodes else []
     for node_id, node in html_nodes.items():
         attrs = node.attrs
         if name == "type" and len(args) == 1:
@@ -3733,6 +5444,43 @@ def _match_hcss_selector_function(function_name: str, raw_args: str, html_nodes:
     return sorted(matched)
 
 
+def _split_hcss_selector_list(selector: str) -> list[str]:
+    parts: list[str] = []
+    start = 0
+    paren_depth = 0
+    bracket_depth = 0
+    quote: str | None = None
+    for index, ch in enumerate(selector):
+        if quote:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            continue
+        if ch == "(":
+            paren_depth += 1
+            continue
+        if ch == ")" and paren_depth:
+            paren_depth -= 1
+            continue
+        if ch == "[":
+            bracket_depth += 1
+            continue
+        if ch == "]" and bracket_depth:
+            bracket_depth -= 1
+            continue
+        if ch == "," and paren_depth == 0 and bracket_depth == 0:
+            part = selector[start:index].strip()
+            if part:
+                parts.append(part)
+            start = index + 1
+    tail = selector[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
 def _compile_hcss_paragraph_rule(
     target_ids: list[str],
     declarations: list[tuple[str, str]],
@@ -3741,11 +5489,31 @@ def _compile_hcss_paragraph_rule(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     errors: list[dict[str, Any]] = []
     patches: list[dict[str, Any]] = []
-    new_properties, property_errors = _hcss_paragraph_properties(declarations)
+    for key, value in declarations:
+        if not key.startswith("hdocx-"):
+            continue
+        prop_name = key.removeprefix("hdocx-")
+        if prop_name in {"insert-empty-paragraph-before", "insert-empty-paragraph-after"} or prop_name.startswith(EMPTY_PARAGRAPH_PROPERTY_PREFIX):
+            errors.append(
+                {
+                    "code": "HCSS_PARAGRAPH_STRUCTURE_MODE_REQUIRED",
+                    "message": "Empty paragraph insertion must use @hdocx-edit mode(paragraph-structure).",
+                    "property": prop_name,
+                    "value": value,
+                }
+            )
+    formatting_declarations = [
+        (key, value)
+        for key, value in declarations
+        if not (key.startswith("hdocx-") and key.removeprefix("hdocx-") in PARAGRAPH_STRUCTURAL_PROPERTIES)
+    ]
+    new_properties, property_errors = _hcss_paragraph_properties(formatting_declarations)
     errors.extend(property_errors)
+    manual_break, manual_break_errors = _hcss_manual_page_break_before(declarations)
+    errors.extend(manual_break_errors)
     if errors:
         return errors, patches, edit_index
-    for node_id in target_ids:
+    for node_id in sorted(set(target_ids)):
         node = manifest_nodes.get(node_id)
         if not node or node.get("kind") != "paragraph":
             errors.append({"code": "HCSS_TARGET_KIND_MISMATCH", "message": "paragraph-formatting requires paragraph targets.", "nodeId": node_id})
@@ -3753,11 +5521,126 @@ def _compile_hcss_paragraph_rule(
         if node.get("lock") != "editable":
             errors.append({"code": "HCSS_TARGET_PROTECTED", "message": "H-CSS matched a protected paragraph.", "nodeId": node_id})
             continue
+        if manual_break == "true":
+            edit_index += 1
+            patches.append(_manual_page_break_patch(edit_index, node_id, node))
         changed = {key: value for key, value in new_properties.items() if node.get("properties", {}).get(key) != value}
         if not changed:
             continue
         edit_index += 1
         patches.append(_paragraph_patch(edit_index, node_id, node, changed))
+    return errors, patches, edit_index
+
+
+def _compile_hcss_paragraph_structure_rule(
+    bundle_dir: Path,
+    target_ids: list[str],
+    declarations: list[tuple[str, str]],
+    manifest_nodes: dict[str, Any],
+    edit_index: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    errors: list[dict[str, Any]] = []
+    patches: list[dict[str, Any]] = []
+    structure, structure_errors = _hcss_paragraph_structure_properties(declarations)
+    errors.extend(structure_errors)
+    if errors:
+        return errors, patches, edit_index
+    for node_id in sorted(set(target_ids)):
+        node = manifest_nodes.get(node_id)
+        if not node or node.get("kind") != "paragraph":
+            errors.append({"code": "HCSS_TARGET_KIND_MISMATCH", "message": "paragraph-structure requires paragraph targets.", "nodeId": node_id})
+            continue
+        if node.get("lock") != "editable":
+            errors.append({"code": "HCSS_TARGET_PROTECTED", "message": "H-CSS matched a protected paragraph.", "nodeId": node_id})
+            continue
+        if structure.get("manual-page-break-before") == "true":
+            edit_index += 1
+            patches.append(_manual_page_break_patch(edit_index, node_id, node))
+        if structure.get("insert-empty-paragraph-before") == "true":
+            noop = _empty_paragraph_insert_noop(bundle_dir, node, "before", structure.get("emptyProperties", {}))
+            if noop:
+                patches.append(_empty_paragraph_noop(node_id, node, "before", noop))
+            else:
+                edit_index += 1
+                patches.append(_empty_paragraph_patch(edit_index, node_id, node, "before", structure.get("emptyProperties", {})))
+        if structure.get("insert-empty-paragraph-after") == "true":
+            noop = _empty_paragraph_insert_noop(bundle_dir, node, "after", structure.get("emptyProperties", {}))
+            if noop:
+                patches.append(_empty_paragraph_noop(node_id, node, "after", noop))
+            else:
+                edit_index += 1
+                patches.append(_empty_paragraph_patch(edit_index, node_id, node, "after", structure.get("emptyProperties", {})))
+    return errors, patches, edit_index
+
+
+def _compile_hcss_image_formatting_rule(
+    target_ids: list[str],
+    declarations: list[tuple[str, str]],
+    manifest_nodes: dict[str, Any],
+    edit_index: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    errors: list[dict[str, Any]] = []
+    patches: list[dict[str, Any]] = []
+    requested_image_props, requested_paragraph_props, property_errors = _hcss_image_formatting_properties(declarations)
+    errors.extend(property_errors)
+    if errors:
+        return errors, patches, edit_index
+
+    run_ids: list[str] = []
+    for node_id in target_ids:
+        node = manifest_nodes.get(node_id)
+        if not node:
+            errors.append({"code": "HCSS_TARGET_NOT_FOUND", "message": "H-CSS target is not in manifest.", "nodeId": node_id})
+            continue
+        if node.get("kind") == "run":
+            run_ids.append(node_id)
+        elif node.get("kind") == "paragraph":
+            for child_id in node.get("children", []):
+                child = manifest_nodes.get(child_id, {})
+                if child.get("kind") == "run" and child.get("objectKind") == "drawing":
+                    run_ids.append(child_id)
+        else:
+            errors.append({"code": "HCSS_TARGET_KIND_MISMATCH", "message": "image-formatting requires drawing run or paragraph targets.", "nodeId": node_id})
+    for run_id in sorted(set(run_ids)):
+        node = manifest_nodes.get(run_id, {})
+        if node.get("kind") != "run" or node.get("objectKind") != "drawing":
+            errors.append({"code": "HCSS_TARGET_KIND_MISMATCH", "message": "image-formatting matched a non-image run.", "nodeId": run_id})
+            continue
+        old_image_props = node.get("objectProperties", {})
+        changed_image_props = {
+            key: value
+            for key, value in requested_image_props.items()
+            if old_image_props.get(key) != value
+        }
+        if changed_image_props:
+            edit_index += 1
+            patches.append(
+                {
+                    "id": f"patch-{edit_index:06d}",
+                    "operation": "patch-drawing-properties",
+                    "partPath": node["partPath"],
+                    "entryName": node["partPath"].lstrip("/"),
+                    "nodeId": run_id,
+                    "locator": node["locator"],
+                    "expectedOldHash": node["hash"],
+                    "oldProperties": old_image_props,
+                    "newProperties": changed_image_props,
+                }
+            )
+        if requested_paragraph_props:
+            paragraph_id = node.get("parent")
+            paragraph = manifest_nodes.get(paragraph_id or "", {})
+            if paragraph.get("kind") != "paragraph":
+                errors.append({"code": "HCSS_IMAGE_PARENT_NOT_FOUND", "message": "Image run parent paragraph was not found.", "nodeId": run_id})
+                continue
+            changed_paragraph_props = {
+                key: value
+                for key, value in requested_paragraph_props.items()
+                if paragraph.get("properties", {}).get(key) != value
+            }
+            if changed_paragraph_props:
+                edit_index += 1
+                patches.append(_paragraph_patch(edit_index, paragraph_id, paragraph, changed_paragraph_props))
     return errors, patches, edit_index
 
 
@@ -4399,6 +6282,103 @@ def _hcss_paragraph_properties(declarations: list[tuple[str, str]]) -> tuple[dic
     return properties, errors
 
 
+def _hcss_manual_page_break_before(declarations: list[tuple[str, str]]) -> tuple[str | None, list[dict[str, Any]]]:
+    errors: list[dict[str, Any]] = []
+    result: str | None = None
+    for key, value in declarations:
+        if not key.startswith("hdocx-"):
+            continue
+        prop_name = key.removeprefix("hdocx-")
+        if prop_name != "manual-page-break-before":
+            continue
+        try:
+            result = _normalize_hcss_bool(prop_name, value)
+        except ValueError as exc:
+            errors.append({"code": "HCSS_INVALID_PARAGRAPH_PROPERTY", "message": str(exc), "property": prop_name, "value": value})
+    return result, errors
+
+
+def _hcss_paragraph_structure_properties(declarations: list[tuple[str, str]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    errors: list[dict[str, Any]] = []
+    result: dict[str, Any] = {"emptyProperties": {}}
+    saw_empty_insert = False
+    for key, value in declarations:
+        if key == "__parse_error__":
+            errors.append({"code": "HCSS_DECLARATION_PARSE_ERROR", "message": "Invalid declaration.", "value": value})
+            continue
+        if not key.startswith("hdocx-"):
+            errors.append({"code": "HCSS_DECLARATION_UNPREFIXED", "message": "Only hdocx-* declarations are accepted.", "property": key})
+            continue
+        prop_name = key.removeprefix("hdocx-")
+        if prop_name in PARAGRAPH_STRUCTURAL_PROPERTIES:
+            try:
+                normalized = _normalize_hcss_bool(prop_name, value)
+            except ValueError as exc:
+                errors.append({"code": "HCSS_INVALID_PARAGRAPH_STRUCTURE_PROPERTY", "message": str(exc), "property": prop_name, "value": value})
+                continue
+            result[prop_name] = normalized
+            if prop_name in {"insert-empty-paragraph-before", "insert-empty-paragraph-after"} and normalized == "true":
+                saw_empty_insert = True
+            continue
+        if prop_name.startswith(EMPTY_PARAGRAPH_PROPERTY_PREFIX):
+            raw_empty_prop = prop_name.removeprefix(EMPTY_PARAGRAPH_PROPERTY_PREFIX)
+            empty_prop = _canonical_empty_paragraph_property_name(raw_empty_prop)
+            try:
+                normalized = _normalize_empty_paragraph_property(raw_empty_prop, value)
+            except ValueError as exc:
+                errors.append({"code": "HCSS_INVALID_EMPTY_PARAGRAPH_PROPERTY", "message": str(exc), "property": prop_name, "value": value})
+                continue
+            result["emptyProperties"][empty_prop] = normalized
+            continue
+        errors.append({"code": "HCSS_PARAGRAPH_STRUCTURE_PROPERTY_UNSUPPORTED", "message": "Unsupported property for paragraph-structure mode.", "property": prop_name})
+    if result["emptyProperties"] and not saw_empty_insert:
+        errors.append(
+            {
+                "code": "HCSS_EMPTY_PARAGRAPH_FORMAT_WITHOUT_INSERT",
+                "message": "empty-paragraph-* declarations require insert-empty-paragraph-before or insert-empty-paragraph-after to be true.",
+            }
+        )
+    return result, errors
+
+
+def _hcss_image_formatting_properties(
+    declarations: list[tuple[str, str]]
+) -> tuple[dict[str, str | None], dict[str, str | None], list[dict[str, Any]]]:
+    errors: list[dict[str, Any]] = []
+    image_props: dict[str, str | None] = {}
+    paragraph_props: dict[str, str | None] = {}
+    for key, value in declarations:
+        if key == "__parse_error__":
+            errors.append({"code": "HCSS_DECLARATION_PARSE_ERROR", "message": "Invalid declaration.", "value": value})
+            continue
+        if not key.startswith("hdocx-"):
+            errors.append({"code": "HCSS_DECLARATION_UNPREFIXED", "message": "Only hdocx-* declarations are accepted.", "property": key})
+            continue
+        raw_prop = key.removeprefix("hdocx-")
+        image_prop = _canonical_image_property_name(raw_prop)
+        if image_prop in IMAGE_FORMATTING_PROPERTIES:
+            try:
+                normalized = _normalize_image_hcss_property(image_prop, value, old_value="1" if image_prop in {"width-emu", "height-emu"} else "")
+            except ValueError as exc:
+                errors.append({"code": "HCSS_INVALID_IMAGE_PROPERTY", "message": str(exc), "property": raw_prop, "value": value})
+                continue
+            image_props[image_prop] = normalized
+            continue
+        paragraph_prop = _canonical_image_paragraph_property_name(raw_prop)
+        if paragraph_prop in PARAGRAPH_PROPERTY_ATTRS and raw_prop.startswith(IMAGE_PARAGRAPH_PROPERTY_PREFIX):
+            try:
+                if raw_prop in {"paragraph-line-spacing-exact", "paragraph-line-spacingExact"} and not _strip_hcss_value(value).endswith("pt"):
+                    raise ValueError("paragraph-line-spacing-exact must use pt units.")
+                normalized = _normalize_paragraph_property(paragraph_prop, value)
+            except ValueError as exc:
+                errors.append({"code": "HCSS_INVALID_IMAGE_PARAGRAPH_PROPERTY", "message": str(exc), "property": raw_prop, "value": value})
+                continue
+            paragraph_props[paragraph_prop] = normalized
+            continue
+        errors.append({"code": "HCSS_IMAGE_PROPERTY_UNSUPPORTED", "message": "Unsupported property for image-formatting mode.", "property": raw_prop})
+    return image_props, paragraph_props, errors
+
+
 def _paragraph_patch(edit_index: int, node_id: str, node: dict[str, Any], changed: dict[str, str | None]) -> dict[str, Any]:
     return {
         "id": f"patch-{edit_index:06d}",
@@ -4410,6 +6390,91 @@ def _paragraph_patch(edit_index: int, node_id: str, node: dict[str, Any], change
         "expectedOldHash": node["hash"],
         "oldProperties": node.get("properties", {}),
         "newProperties": changed,
+    }
+
+
+def _manual_page_break_patch(edit_index: int, node_id: str, node: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": f"patch-{edit_index:06d}",
+        "operation": "insert-manual-page-break-before",
+        "partPath": node["partPath"],
+        "entryName": node["partPath"].lstrip("/"),
+        "nodeId": node_id,
+        "locator": node["locator"],
+        "expectedOldHash": node["hash"],
+    }
+
+
+def _empty_paragraph_patch(
+    edit_index: int,
+    node_id: str,
+    node: dict[str, Any],
+    position: str,
+    empty_properties: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "id": f"patch-{edit_index:06d}",
+        "operation": f"insert-empty-paragraph-{position}",
+        "partPath": node["partPath"],
+        "entryName": node["partPath"].lstrip("/"),
+        "nodeId": node_id,
+        "locator": node["locator"],
+        "expectedOldHash": node["hash"],
+        "newProperties": dict(empty_properties),
+    }
+
+
+def _empty_paragraph_noop(node_id: str, node: dict[str, Any], position: str, details: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "noop": True,
+        "operation": f"insert-empty-paragraph-{position}",
+        "reason": "idempotent-empty-paragraph-already-present",
+        "partPath": node["partPath"],
+        "entryName": node["partPath"].lstrip("/"),
+        "nodeId": node_id,
+        "locator": node["locator"],
+        **details,
+    }
+
+
+def _empty_paragraph_insert_noop(
+    bundle_dir: Path,
+    node: dict[str, Any],
+    position: str,
+    requested_properties: dict[str, str],
+) -> dict[str, Any] | None:
+    part_path = node.get("partPath")
+    locator = node.get("locator") or {}
+    paragraph_index = int(locator.get("paragraphIndex") or 0)
+    if not part_path or paragraph_index <= 0:
+        return None
+    local_part = bundle_dir / "parts" / Path(part_path.lstrip("/"))
+    if not local_part.exists():
+        return None
+    try:
+        root = ET.fromstring(local_part.read_bytes())
+    except ET.ParseError:
+        return None
+    paragraphs = root.findall(".//w:p", NS)
+    target_index = paragraph_index - 1
+    neighbor_index = target_index - 1 if position == "before" else target_index + 1
+    if neighbor_index < 0 or neighbor_index >= len(paragraphs):
+        return None
+    neighbor = paragraphs[neighbor_index]
+    if not _is_empty_paragraph_xml(neighbor):
+        return None
+    existing_properties = _paragraph_spacing_properties_xml(neighbor)
+    mismatched = {
+        key: {"expected": value, "actual": existing_properties.get(key)}
+        for key, value in requested_properties.items()
+        if existing_properties.get(key) != value
+    }
+    if mismatched:
+        return None
+    return {
+        "neighborParagraphIndex": neighbor_index + 1,
+        "existingProperties": existing_properties,
+        "requestedProperties": dict(requested_properties),
     }
 
 

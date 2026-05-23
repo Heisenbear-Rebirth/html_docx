@@ -120,6 +120,15 @@ def patch_document_run_text(document_xml: bytes, edits: list[dict[str, Any]]) ->
             _insert_image_around_paragraph(root, paragraph, edit, position)
             continue
 
+        if edit["operation"] == "insert-manual-page-break-before":
+            _insert_manual_page_break_before(root, paragraph, edit)
+            continue
+
+        if edit["operation"] in {"insert-empty-paragraph-before", "insert-empty-paragraph-after"}:
+            position = "before" if edit["operation"] == "insert-empty-paragraph-before" else "after"
+            _insert_empty_paragraph_around(root, paragraph, edit, position)
+            continue
+
         run_in_paragraph_index = locator["runInParagraphIndex"]
         split_segments = edit.get("splitSegments")
         new_text = edit.get("newText")
@@ -622,10 +631,7 @@ def _edit_sort_key(edit: dict[str, Any]) -> tuple[int, int]:
 
 
 def _patch_paragraph_properties(paragraph: ET.Element, properties: dict[str, str | None]) -> None:
-    p_pr = paragraph.find("w:pPr", NS)
-    if p_pr is None:
-        p_pr = ET.Element(_tag("pPr"))
-        paragraph.insert(0, p_pr)
+    p_pr = _ensure_paragraph_properties(paragraph)
     for name, value in properties.items():
         if name == "align":
             _set_alignment(p_pr, value)
@@ -644,10 +650,7 @@ def _patch_paragraph_properties(paragraph: ET.Element, properties: dict[str, str
 
 
 def _patch_paragraph_style(paragraph: ET.Element, style_id: str) -> None:
-    p_pr = paragraph.find("w:pPr", NS)
-    if p_pr is None:
-        p_pr = ET.Element(_tag("pPr"))
-        paragraph.insert(0, p_pr)
+    p_pr = _ensure_paragraph_properties(paragraph)
     p_style = p_pr.find("w:pStyle", NS)
     if p_style is None:
         p_style = ET.Element(_tag("pStyle"))
@@ -656,10 +659,7 @@ def _patch_paragraph_style(paragraph: ET.Element, style_id: str) -> None:
 
 
 def _patch_paragraph_numbering(paragraph: ET.Element, num_id: str, ilvl: str) -> None:
-    p_pr = paragraph.find("w:pPr", NS)
-    if p_pr is None:
-        p_pr = ET.Element(_tag("pPr"))
-        paragraph.insert(0, p_pr)
+    p_pr = _ensure_paragraph_properties(paragraph)
     num_pr = p_pr.find("w:numPr", NS)
     if num_pr is None:
         num_pr = ET.SubElement(p_pr, _tag("numPr"))
@@ -672,6 +672,14 @@ def _patch_paragraph_numbering(paragraph: ET.Element, num_id: str, ilvl: str) ->
     if num_id_el is None:
         num_id_el = ET.SubElement(num_pr, _tag("numId"))
     num_id_el.attrib[_tag("val")] = num_id
+
+
+def _ensure_paragraph_properties(paragraph: ET.Element) -> ET.Element:
+    p_pr = paragraph.find("w:pPr", NS)
+    if p_pr is None:
+        p_pr = ET.Element(_tag("pPr"))
+        paragraph.insert(0, p_pr)
+    return p_pr
 
 
 def _set_alignment(p_pr: ET.Element, value: str | None) -> None:
@@ -1105,6 +1113,104 @@ def _insert_image_around_paragraph(root: ET.Element, paragraph: ET.Element, edit
         ) from exc
     insert_index = index if position == "before" else index + 1
     parent.insert(insert_index, _image_paragraph(edit))
+
+
+def _insert_manual_page_break_before(root: ET.Element, paragraph: ET.Element, edit: dict[str, Any]) -> None:
+    parent = _find_parent(root, paragraph)
+    if parent is None:
+        raise HDocxError(
+            "PATCH_PARAGRAPH_PARENT_NOT_FOUND",
+            "Target paragraph parent was not found for manual page-break insertion.",
+            {"editId": edit["id"], "nodeId": edit["nodeId"]},
+        )
+    children = list(parent)
+    try:
+        index = children.index(paragraph)
+    except ValueError as exc:
+        raise HDocxError(
+            "PATCH_PARAGRAPH_PARENT_NOT_FOUND",
+            "Target paragraph no longer belongs to its parent.",
+            {"editId": edit["id"], "nodeId": edit["nodeId"]},
+        ) from exc
+    if index > 0 and _is_manual_page_break_paragraph(children[index - 1]):
+        return
+    parent.insert(index, _manual_page_break_paragraph())
+
+
+def _manual_page_break_paragraph() -> ET.Element:
+    paragraph = ET.Element(_tag("p"))
+    run = ET.SubElement(paragraph, _tag("r"))
+    ET.SubElement(run, _tag("br"), {_tag("type"): "page"})
+    return paragraph
+
+
+def _is_manual_page_break_paragraph(paragraph: ET.Element) -> bool:
+    meaningful_children = [child for child in list(paragraph) if child.tag != _tag("pPr")]
+    if len(meaningful_children) != 1 or meaningful_children[0].tag != _tag("r"):
+        return False
+    run_children = list(meaningful_children[0])
+    if len(run_children) != 1 or run_children[0].tag != _tag("br"):
+        return False
+    return run_children[0].attrib.get(_tag("type")) == "page"
+
+
+def _insert_empty_paragraph_around(root: ET.Element, paragraph: ET.Element, edit: dict[str, Any], position: str) -> None:
+    parent = _find_parent(root, paragraph)
+    if parent is None:
+        raise HDocxError(
+            "PATCH_PARAGRAPH_PARENT_NOT_FOUND",
+            "Target paragraph parent was not found for empty paragraph insertion.",
+            {"editId": edit["id"], "nodeId": edit["nodeId"]},
+        )
+    children = list(parent)
+    try:
+        index = children.index(paragraph)
+    except ValueError as exc:
+        raise HDocxError(
+            "PATCH_PARAGRAPH_PARENT_NOT_FOUND",
+            "Target paragraph no longer belongs to its parent.",
+            {"editId": edit["id"], "nodeId": edit["nodeId"]},
+        ) from exc
+    neighbor_index = index - 1 if position == "before" else index + 1
+    if 0 <= neighbor_index < len(children) and _is_empty_paragraph(children[neighbor_index]):
+        _apply_empty_paragraph_properties(children[neighbor_index], edit)
+        return
+    insert_index = index if position == "before" else index + 1
+    parent.insert(insert_index, _empty_paragraph(edit))
+
+
+def _empty_paragraph(edit: dict[str, Any]) -> ET.Element:
+    paragraph = ET.Element(_tag("p"))
+    _apply_empty_paragraph_properties(paragraph, edit)
+    return paragraph
+
+
+def _apply_empty_paragraph_properties(paragraph: ET.Element, edit: dict[str, Any]) -> None:
+    properties = dict(edit.get("newProperties", {}))
+    style_id = properties.pop("style-id", None)
+    if style_id:
+        p_pr = _ensure_paragraph_properties(paragraph)
+        p_style = p_pr.find("w:pStyle", NS)
+        if p_style is None:
+            p_pr.insert(0, ET.Element(_tag("pStyle"), {_tag("val"): style_id}))
+        else:
+            p_style.attrib[_tag("val")] = style_id
+    if properties:
+        _patch_paragraph_properties(paragraph, properties)
+
+
+def _is_empty_paragraph(paragraph: ET.Element) -> bool:
+    if paragraph.tag != _tag("p"):
+        return False
+    if _is_manual_page_break_paragraph(paragraph):
+        return False
+    if any((text_node.text or "") for text_node in paragraph.findall(".//w:t", NS)):
+        return False
+    if paragraph.findall(".//w:drawing", NS):
+        return False
+    if paragraph.findall(".//w:br", NS):
+        return False
+    return True
 
 
 def _find_parent(root: ET.Element, target: ET.Element) -> ET.Element | None:

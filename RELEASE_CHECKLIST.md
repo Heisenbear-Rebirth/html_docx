@@ -17,7 +17,7 @@ python -m unittest discover -s tests
 Expected current result:
 
 ```text
-81 tests passing
+101 tests passing
 ```
 
 ## CLI Smoke Tests
@@ -27,7 +27,6 @@ $env:PYTHONPATH = "src"
 python -m html_docx doctor
 python -m html_docx --help
 python -m html_docx audit sample.docx --report sample-audit.json
-python -m html_docx render-check sample.docx --out sample-render --force --allow-missing --report sample-render.json
 ```
 
 For a sample DOCX:
@@ -48,6 +47,12 @@ python -m html_docx batch-check fixtures --work pressure-work --out pressure-out
 - Unmodified DOCX roundtrip is byte-identical.
 - Plain editable text edits patch only intended nodes.
 - Run formatting and paragraph formatting produce explicit patch reports.
+- Image formatting can patch existing DrawingML size/alt metadata and host paragraph spacing.
+- Structural blank-line insertion uses real empty paragraphs, is idempotent, and is reported by `emptyParagraphDiff`.
+- Structured query/find can locate text, formatting, images, host paragraphs, and likely level-1 headings without reading HTML directly.
+- Assertion checks can verify unchanged text payload, required empty paragraphs, and image host paragraph line-spacing risks.
+- Assertion checks can validate either current-bundle state or planned post-apply state.
+- Level-1 heading assertions can narrow heuristic matches with include/exclude regexes and default front-matter exclusions.
 - Style and numbering edits are represented as dedicated H-CSS modes.
 - Missing style and numbering parts can be created through controlled H-CSS operations.
 - Unused style deletion is allowed; used/default style deletion is rejected.
@@ -55,12 +60,13 @@ python -m html_docx batch-check fixtures --work pressure-work --out pressure-out
 - Headers, footnotes, comments, revisions, images, and equations have explicit support or explicit protection.
 - Directory pressure checks can be run through `batch-check` using `PRESSURE_FIXTURES.md`.
 - Built-in pressure fixtures can be generated through `generate-fixtures`.
-- Optional render QA records renderer availability and PDF output when LibreOffice/soffice exists.
 - Unknown or unsupported structures are preserved or rejected, never silently simplified.
 
 ## Report Acceptance
 
 - `plan` explains intended patches.
+- `query` / `find` return structured target matches.
+- `assert` returns pass/fail assertion reports.
 - `apply` reports patch count, operation summary, and package diff.
 - `apply` reports patch risk classes.
 - `diff` reports byte identity, entry identity, entry details, semantic node diff, and fragment byte ranges linked to node ids.

@@ -29,11 +29,13 @@ For an existing document:
 $env:PYTHONPATH = "src"
 python -m html_docx export input.docx --out work.hdocx --force
 python -m html_docx audit input.docx --report audit.json
+python -m html_docx query work.hdocx --text "Keywords"
+python -m html_docx find work.hdocx --kind image
 python -m html_docx inspect work.hdocx --kind node --id p-000001
 python -m html_docx plan work.hdocx --report plan.json
 python -m html_docx apply work.hdocx --out output.docx --report apply.json
 python -m html_docx diff input.docx output.docx --report diff.json
-python -m html_docx render-check output.docx --out render-out --force --allow-missing --report render.json
+python -m html_docx assert work.hdocx --assertion text-payload-unchanged
 ```
 
 For an unedited reversibility check:
@@ -66,7 +68,16 @@ Agents must not edit:
 - Read-only metadata attributes such as `data-hdocx-id`, style ids, numbering ids, or protected-kind attributes.
 - Non-media files under `parts/` unless a dedicated operation supports the change.
 
-## Inspection
+## Query, Find, And Inspect
+
+Use `query` / `find` before reading `document.html` directly. These commands
+return structured JSON for text and formatting targets:
+
+```powershell
+python -m html_docx query work.hdocx --text "Keywords"
+python -m html_docx query work.hdocx --align center --font-size 14pt --font-family SimHei --suspected-heading-level1
+python -m html_docx find work.hdocx --kind image
+```
 
 Use `inspect` before writing broad H-CSS rules:
 
@@ -79,6 +90,26 @@ python -m html_docx inspect work.hdocx --kind image --id r-000001
 ```
 
 Use `audit` before editing unfamiliar real-world DOCX files. Treat reported high-risk structures such as customXml, charts, SmartArt, OLE, AlternateContent, fields, equations, revisions, and comments as preserved/protected unless a dedicated H-CSS mode supports the exact requested change.
+
+Use `assert` for final checks that should be explicit in an agent report:
+
+```powershell
+python -m html_docx assert work.hdocx --assertion text-payload-unchanged
+python -m html_docx assert work.hdocx --assertion images-host-paragraph-not-exact-line-spacing
+python -m html_docx assert work.hdocx --assertions-json "[{\"type\":\"paragraphs-have-empty-before\",\"paragraphIds\":[\"p-000006\"]}]"
+python -m html_docx assert work.hdocx --assertions-json "[{\"type\":\"paragraphs-have-empty-before\",\"paragraphIds\":[\"p-000006\"],\"afterApply\":true}]"
+```
+
+Assertions without `afterApply` inspect the current bundle, except
+`text-payload-unchanged`, which checks the planned patch list. Use
+`afterApply: true` or `plannedOutput: true` when a structural or formatting
+assertion should evaluate the post-apply, re-exported state. The scratch output
+stays inside the bundle.
+
+For `level1-headings-have-empty-paragraph-before`, use `includeRegex` and
+`excludeRegex` when the heading heuristic needs narrowing. The default excludes
+front-matter labels such as abstract, contents, and keywords; set
+`useDefaultExcludes: false` only when those labels are intentional targets.
 
 ## H-CSS Safety Pattern
 
@@ -112,6 +143,35 @@ Use `@hdocx-edit mode(paragraph-formatting);` for:
 | `hdocx-line-spacing-exact` | positive `pt` | `w:pPr/w:spacing @w:lineRule="exact"` |
 | `hdocx-space-before` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing` |
 | `hdocx-space-after` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing` |
+| `hdocx-manual-page-break-before` | `true` or `false` | inserts an idempotent manual page-break paragraph before the target paragraph |
+
+Use `@hdocx-edit mode(paragraph-structure);` for real structural paragraphs,
+especially blank lines that must exist as empty Word paragraphs rather than as
+paragraph spacing on neighboring text:
+
+| Declaration | Value | OOXML mapping |
+| --- | --- | --- |
+| `hdocx-insert-empty-paragraph-before` | `true` or `false` | idempotent empty `<w:p>` before the target paragraph |
+| `hdocx-insert-empty-paragraph-after` | `true` or `false` | idempotent empty `<w:p>` after the target paragraph |
+| `hdocx-empty-paragraph-style-id` | existing simple style id | inserted empty paragraph `w:pStyle` |
+| `hdocx-empty-paragraph-line-spacing` | positive multiple or exact `pt` | inserted empty paragraph `w:spacing` |
+| `hdocx-empty-paragraph-line-spacing-exact` | positive `pt` | inserted empty paragraph exact `w:spacing` |
+| `hdocx-empty-paragraph-space-before` | `0`, non-negative `pt`, or `line` | inserted empty paragraph spacing before |
+| `hdocx-empty-paragraph-space-after` | `0`, non-negative `pt`, or `line` | inserted empty paragraph spacing after |
+
+```css
+@hdocx-edit mode(paragraph-structure);
+
+#p-000010 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+```
+
+`hdocx_diff` reports inserted blank paragraphs under `emptyParagraphDiff` and
+aligns subsequent semantic nodes so unchanged text does not appear as an edit.
 
 Use `@hdocx-edit mode(all-runs);` for:
 
@@ -123,6 +183,25 @@ Use `@hdocx-edit mode(all-runs);` for:
 | `hdocx-font-size` | positive `pt` | `w:sz` half-points |
 | `hdocx-bold` / `hdocx-italic` | `true` or `false` | `w:b` / `w:i` |
 | `hdocx-color` | `#RRGGBB` | `w:color @w:val` |
+
+Use `@hdocx-edit mode(image-formatting);` for existing projected images. This
+mode targets drawing runs, or paragraphs containing drawing runs. It supports
+`hdocx-alt`, `hdocx-width-emu`, `hdocx-height-emu`, and host paragraph
+properties prefixed with `hdocx-paragraph-`: `line-spacing`,
+`line-spacing-exact`, `space-before`, `space-after`, `text-align`/`align`.
+Use host paragraph spacing when fixed body line spacing clips an inline image:
+
+```css
+@hdocx-edit mode(image-formatting);
+
+#r-000001 {
+  hdocx-width-emu: 1828800;
+  hdocx-height-emu: 914400;
+  hdocx-paragraph-line-spacing: 1;
+  hdocx-paragraph-space-before: 0;
+  hdocx-paragraph-space-after: 0;
+}
+```
 
 Typical paper-body format:
 
@@ -157,6 +236,10 @@ generated patch ids.
 Function selectors keep common targeting concise:
 
 ```css
+@hdocx-set target-paragraph {
+  select: id(p-000001);
+}
+
 @hdocx-set body-style {
   select: style(BodyText);
 }
@@ -172,8 +255,23 @@ Function selectors keep common targeting concise:
 
 Supported selectors are ids, classes, exact attributes, class+attribute
 compounds such as `.hdocx-r[data-hdocx-id="r-000001"]`, and the H-DOCX
-functions above. Comma grouping selectors are intentionally unsupported; use
-`@hdocx-set` for reusable groups.
+functions above. Selector lists separated by commas are supported both in rules
+and inside `@hdocx-set`.
+
+Keep agent-defined groups in `agent.edits.hcss`; do not add custom classes or
+other projection metadata to `document.html`. Use selector lists or named sets
+instead:
+
+```css
+@hdocx-set body {
+  select: id(p-000007), id(p-000008), id(p-000009);
+}
+
+.role-body,
+.role-reference {
+  hdocx-font-size: 10.5pt;
+}
+```
 
 If a selector may legitimately match nothing, make that explicit:
 
@@ -181,6 +279,18 @@ If a selector may legitimately match nothing, make that explicit:
 @hdocx-set optional-notes {
   select: .maybe-note;
   allow-empty: true;
+}
+```
+
+Manual page breaks must use the explicit structural declaration rather than
+automatic pagination properties. `diff` reports them under
+`manualPageBreakDiff` and keeps subsequent text nodes aligned for review:
+
+```css
+@hdocx-edit mode(paragraph-formatting);
+
+.hdocx-p[data-hdocx-id="p-000006"] {
+  hdocx-manual-page-break-before: true;
 }
 ```
 
@@ -211,6 +321,5 @@ Before delivering an edited DOCX:
 3. Run `diff`.
 4. Confirm changed entries, `semanticDiff` nodes, and `fragmentDiff` byte ranges match the requested edit.
 5. For unedited or fixture validation, run `check` or `batch-check`.
-6. When a renderer is available, run `render-check`; when it is not available, use `--allow-missing` so the absence is recorded explicitly.
 
 Do not call a document safe merely because a DOCX file was produced. The diff report is part of the deliverable.

@@ -43,18 +43,16 @@ H-DOCX 采用不同策略：
 
 当前版本的本地验收结果：
 
-- `81` 个单元测试通过。
+- `101` 个单元测试通过。
 - 内置压力 fixture 往返：`6/6` 字节级一致。
 - 真实样例往返：字节级一致，语义节点一致。
 - MCP stdio smoke test 通过。
-- 如果系统提供 LibreOffice/soffice，可执行可选渲染 QA。
 
 ## 环境要求
 
 - Windows PowerShell，用于执行随仓库提供的安装脚本。
 - Python `>=3.11`。
 - 包本身没有 Python 运行时依赖。
-- 可选：PATH 中有 LibreOffice/soffice，用于渲染 QA。
 
 项目设计上避免全局安装 Python 包。建议使用工作区 `.venv`，或使用下面的用户级
 隔离安装脚本。
@@ -210,12 +208,14 @@ work.hdocx/
 
 | 命令 | 用途 |
 | --- | --- |
-| `doctor` | 报告运行时能力和可选渲染器状态。 |
+| `doctor` | 报告运行时能力。 |
 | `create` | 新建 canonical DOCX，可选同步导出 H-DOCX。 |
 | `audit` | 检测高风险 DOCX 结构和保留策略。 |
 | `export` | 把 DOCX 导出为 H-DOCX bundle。 |
 | `validate` | 在 apply 前验证 H-DOCX bundle。 |
 | `inspect` | 按 id 检查节点、样式、列表、表格或图片。 |
+| `query` / `find` | 按文本、样式、字体、段落格式、是否含图片或疑似一级标题返回结构化匹配。 |
+| `assert` | 对 bundle 执行断言式验收检查。 |
 | `plan` | 只规划编辑，不写 DOCX。 |
 | `apply` | 把 bundle 应用回 DOCX。 |
 | `diff` | 比较两个 DOCX 的包、语义节点和片段差异。 |
@@ -223,10 +223,49 @@ work.hdocx/
 | `check` | 对单个 DOCX 执行 export/apply/diff 验收。 |
 | `batch-check` | 对文件或目录批量执行 `check`。 |
 | `generate-fixtures` | 生成内置压力 DOCX fixture。 |
-| `render-check` | 通过 LibreOffice/soffice 执行可选渲染检查。 |
 | `mcp` | 启动 stdio MCP server。 |
 
 包也会安装专用的 `html-docx-mcp` 命令，供 MCP 客户端使用。
+
+## 结构化查询与断言
+
+定位目标时优先使用 `query` / `find`，不要让 agent 直接读
+`document.html` 原文。查询结果来自投影 manifest，会返回节点 id、宿主段落、
+图片 run、有效格式属性，以及疑似一级标题的启发式理由。
+
+```powershell
+html-docx query work.hdocx --text "关键词"
+html-docx query work.hdocx --align center --font-size 14pt --font-family SimHei --suspected-heading-level1
+html-docx find work.hdocx --kind image
+```
+
+编辑后可以用 `assert` 做验收，减少 agent 自己写临时 Python 脚本：
+
+```powershell
+html-docx assert work.hdocx --assertion text-payload-unchanged
+html-docx assert work.hdocx --assertion images-host-paragraph-not-exact-line-spacing
+html-docx assert work.hdocx --assertions-json "[{\"type\":\"paragraphs-have-empty-before\",\"paragraphIds\":[\"p-000006\"]}]"
+html-docx assert work.hdocx --assertions-json "[{\"type\":\"paragraphs-have-empty-before\",\"paragraphIds\":[\"p-000006\"],\"afterApply\":true}]"
+```
+
+内置断言包括：
+
+- `text-payload-unchanged`
+- `paragraphs-have-empty-before`
+- `paragraphs-have-empty-after`
+- `images-host-paragraph-not-exact-line-spacing`
+- `level1-headings-have-empty-paragraph-before`
+
+默认情况下，结构和格式断言检查当前导出的 bundle 投影。若某条断言对象设置
+`afterApply: true` 或 `plannedOutput: true`，工具会在 bundle 内部生成临时
+planned 输出 DOCX，重新 export 后检查应用后的投影状态。`text-payload-unchanged`
+默认检查计划 patch 是否改正文；设置 `afterApply: true` 后会比较原始文档与
+planned 输出的文本 payload。
+
+`level1-headings-have-empty-paragraph-before` 使用一级标题启发式。它支持
+`includeRegex` 和 `excludeRegex`，并默认排除“摘要 / Abstract / 目录 /
+Contents / 关键词”等前置标题。若这些前置标题本来就是目标，可设置
+`useDefaultExcludes: false`。
 
 ## H-CSS 示例
 
@@ -265,10 +304,50 @@ body {
 | `hdocx-line-spacing-exact` | 正数 `pt` | `w:pPr/w:spacing @w:lineRule="exact"` |
 | `hdocx-space-before` | `0`、非负 `pt` 或 `line` | `w:pPr/w:spacing @w:before` 或 `@w:beforeLines` |
 | `hdocx-space-after` | `0`、非负 `pt` 或 `line` | `w:pPr/w:spacing @w:after` 或 `@w:afterLines` |
+| `hdocx-manual-page-break-before` | `true` 或 `false` | 在目标段落前插入幂等的手动分页段落 |
+
+### 段落结构
+
+当目标输出需要真实的 Word 结构段落，而不是只调已有段落的视觉间距时，
+使用 `@hdocx-edit mode(paragraph-structure);`。空行属于这一类：它会被写成
+真正的空 `<w:p>`。`plan` 会报告 `insert-empty-paragraph-after` 等结构操作；
+`apply` 在相邻位置已经有空段落时会跳过重复插入；`diff` 会把空行变化报告到
+`emptyParagraphDiff`，并对齐后续语义节点，避免把未改正文误报成文本变化。
+
+```css
+@hdocx-edit mode(paragraph-structure);
+
+#p-000010 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+```
+
+支持的段落结构声明：
+
+| 声明 | 取值 | OOXML 映射 |
+| --- | --- | --- |
+| `hdocx-insert-empty-paragraph-before` | `true` 或 `false` | 在目标段落前插入幂等的空 `<w:p>` |
+| `hdocx-insert-empty-paragraph-after` | `true` 或 `false` | 在目标段落后插入幂等的空 `<w:p>` |
+| `hdocx-empty-paragraph-style-id` | 已存在的简单样式 id | 插入空段落的 `w:pPr/w:pStyle @w:val` |
+| `hdocx-empty-paragraph-line-spacing` | 正数倍数或精确 `pt` | 插入空段落的 `w:pPr/w:spacing` |
+| `hdocx-empty-paragraph-line-spacing-exact` | 正数 `pt` | 插入空段落的 `w:pPr/w:spacing @w:lineRule="exact"` |
+| `hdocx-empty-paragraph-space-before` | `0`、非负 `pt` 或 `line` | 插入空段落的 `w:pPr/w:spacing @w:before` 或 `@w:beforeLines` |
+| `hdocx-empty-paragraph-space-after` | `0`、非负 `pt` 或 `line` | 插入空段落的 `w:pPr/w:spacing @w:after` 或 `@w:afterLines` |
+
+如果只是让两段看起来分开，优先用 `hdocx-space-before` /
+`hdocx-space-after`。如果 Word 里必须存在一个可拥有独立行距和段前段后距的
+真实空行，就使用段落结构模式。
 
 ### 函数选择器
 
 ```css
+@hdocx-set target-paragraph {
+  select: id(p-000001);
+}
+
 @hdocx-set body-style {
   select: style(BodyText);
 }
@@ -283,8 +362,23 @@ body {
 ```
 
 选择器支持范围刻意较小：id、class、精确属性选择器、class+属性复合选择器
-（例如 `.hdocx-r[data-hdocx-id="r-000001"]`），以及上面的 H-DOCX 函数。
-不支持逗号分组选择器；需要复用目标时请使用 `@hdocx-set`。
+（例如 `.hdocx-r[data-hdocx-id="r-000001"]`）、逗号分隔的 selector list，
+以及上面的 H-DOCX 函数。
+
+安全分组应写在 `agent.edits.hcss` 里；不要为了分组去修改
+`document.html` 添加自定义 class 或其他投影元数据。普通规则和
+`@hdocx-set` 的 `select` 都支持 selector list：
+
+```css
+@hdocx-set body {
+  select: id(p-000007), id(p-000008), id(p-000009);
+}
+
+.role-body,
+.role-reference {
+  hdocx-font-size: 10.5pt;
+}
+```
 
 ### Run 格式
 
@@ -313,6 +407,41 @@ body {
 | `hdocx-italic` | `true` 或 `false` | `w:i` |
 | `hdocx-color` | `#RRGGBB` | `w:color @w:val` |
 
+### 图片格式
+
+已有投影图片使用 `@hdocx-edit mode(image-formatting);`。这个模式可以修改
+DrawingML 元数据和尺寸，也可以修改图片所在段落的行距/段距，避免 inline 图片
+因为继承了正文固定行距而被裁掉或看起来像被隐藏。
+
+```css
+@hdocx-edit mode(image-formatting);
+
+#r-000001 {
+  hdocx-width-emu: 1828800;
+  hdocx-height-emu: 914400;
+  hdocx-alt: "Scaled figure";
+  hdocx-paragraph-line-spacing: 1;
+  hdocx-paragraph-space-before: 0;
+  hdocx-paragraph-space-after: 0;
+}
+```
+
+支持的图片声明：
+
+| 声明 | 取值 | OOXML 映射 |
+| --- | --- | --- |
+| `hdocx-alt` | 带引号或不带引号的文本 | `wp:docPr @descr` |
+| `hdocx-width-emu` | 正整数 EMU | `wp:extent @cx` |
+| `hdocx-height-emu` | 正整数 EMU | `wp:extent @cy` |
+| `hdocx-paragraph-line-spacing` | 正数倍数或精确 `pt` | 图片所在段落的 `w:pPr/w:spacing` |
+| `hdocx-paragraph-line-spacing-exact` | 正数 `pt` | 图片所在段落的精确行距 |
+| `hdocx-paragraph-space-before` | `0`、非负 `pt` 或 `line` | 图片所在段落的段前距 |
+| `hdocx-paragraph-space-after` | `0`、非负 `pt` 或 `line` | 图片所在段落的段后距 |
+| `hdocx-paragraph-text-align` / `hdocx-paragraph-align` | `left`、`center`、`right`、`justify`/`both` | 图片所在段落对齐 |
+
+如果图片在应用论文正文固定行距后被裁切，优先定位图片 run，并设置
+`hdocx-paragraph-line-spacing: 1`，让图片所在段落回到不会裁切 inline 图片的自动单倍行距。
+
 ### 论文正文格式示例
 
 ```css
@@ -336,6 +465,22 @@ body {
   hdocx-font-family: "Times New Roman";
   hdocx-eastAsia-font: "SimSun";
   hdocx-font-size: 10.5pt;
+}
+```
+
+### 手动分页符
+
+需要显式手动分页时，使用 `hdocx-manual-page-break-before: true`，不要用
+Word 的自动分页属性 `pageBreakBefore`。`plan` 会报告
+`insert-manual-page-break-before`，`apply` 会在目标段落前插入独立的分页段落；
+如果同一位置已经存在该分页符，会跳过重复插入。`diff` 会把这类变化报告到
+`manualPageBreakDiff`，并对齐后续语义节点，避免仅因插入分页段落而误报正文改变。
+
+```css
+@hdocx-edit mode(paragraph-formatting);
+
+.hdocx-p[data-hdocx-id="p-000006"] {
+  hdocx-manual-page-break-before: true;
 }
 ```
 
@@ -422,15 +567,17 @@ html-docx-mcp
 }
 ```
 
-MCP server 提供 `hdocx_create`、`hdocx_audit`、`hdocx_export`、`hdocx_plan`、
-`hdocx_apply`、`hdocx_diff`、`hdocx_check`、`hdocx_batch_check`、
-`hdocx_inspect`、`hdocx_render_check`、`hdocx_guidance` 等 tools。
+MCP server 提供 `hdocx_create`、`hdocx_audit`、`hdocx_export`、
+`hdocx_query`、`hdocx_find`、`hdocx_inspect`、`hdocx_plan`、
+`hdocx_apply`、`hdocx_diff`、`hdocx_assert`、`hdocx_check`、
+`hdocx_batch_check`、`hdocx_guidance` 等 tools。
 
 它还暴露 agent 可直接读取的 resources 和 prompts：
 
 ```text
 hdocx://guide/workflow
 hdocx://guide/writing-format
+hdocx://guide/query
 hdocx://guide/hcss
 hdocx://guide/acceptance
 hdocx://guide/edge-cases
@@ -448,8 +595,17 @@ Agent 编辑前应读取相关 resource。若某个 MCP 客户端不展示 resou
 如果不传 `root`，server 会依次使用 `HDOCX_MCP_ROOT`、`CLAUDE_PROJECT_DIR`，
 最后才使用 MCP server 当前目录。
 
-Tool 调用应串行执行。如果客户端同时调用两个工具，server 会返回结构化的
-`MCP_SERVER_BUSY`，而不是冒险打断 stdio transport。
+Tool 调用应串行执行。如果同一个 server 实例内两个 tool handler 真的重叠，
+server 会返回结构化的 `MCP_SERVER_BUSY`，而不是冒险打断 stdio transport。
+有些客户端即使让 agent 并行调用，也会把短调用排队后顺序送到 server；这种
+情况下两个调用都成功是正常的，因为它们实际没有在 server 内重叠。
+
+`hdocx_doctor` 会报告已加载模块路径、包版本、git commit 或模块时间戳、
+支持的 H-CSS edit mode、支持的 H-CSS 属性、stdio 编码和 guidance 来源哈希。
+如果 README 与 MCP 实际行为不一致，先运行 `hdocx_doctor`，确认 MCP 进程到底
+加载了哪份代码。
+项目升级后需要重启 MCP 客户端或 server 进程；长时间运行的 MCP 进程会继续使用
+启动时已经加载的旧代码。
 
 Agent 策略：
 
@@ -468,10 +624,6 @@ Agent 策略：
 - 新 DOCX 或未知 DOCX：`html-docx audit` 和 `html-docx check`
 - 编辑 DOCX：`html-docx apply` 后运行 `html-docx diff`
 - 修改转换核心：`generate-fixtures` 后运行 `batch-check`
-- 排版敏感的编辑输出：有 LibreOffice/soffice 时运行 `render-check`
-
-`render-check` 是可选项，因为它依赖外部渲染器。`renderer-missing` 表示渲染器不
-可用，不代表字节级一致的未编辑往返失败。
 
 ## 支持的编辑面
 

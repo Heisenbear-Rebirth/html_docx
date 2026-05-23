@@ -119,9 +119,14 @@ class CLITests(unittest.TestCase):
         self.assertTrue(report["ok"], report)
         self.assertEqual(report["command"], "doctor")
         self.assertEqual(report["package"]["dependencies"], [])
+        self.assertIn("loadedModulePath", report["package"])
+        self.assertIn("loaded_module_path", report["runtime"])
+        self.assertIn("package_version", report["runtime"])
+        self.assertIn("supported_edit_modes", report["runtime"])
+        self.assertIn("supported_hcss_properties", report["runtime"])
+        self.assertIn("paragraph-structure", report["capabilities"]["hcss"]["supportedEditModes"])
+        self.assertIn("hdocx-insert-empty-paragraph-after", report["capabilities"]["hcss"]["supportedProperties"]["paragraph-structure"])
         self.assertFalse(report["capabilities"]["requiresExternalRuntime"])
-        self.assertIn("rendering", report["capabilities"])
-        self.assertIn("available", report["capabilities"]["rendering"])
 
     def test_create_command_can_export_new_docx(self) -> None:
         output_docx = TMP / "created.docx"
@@ -175,7 +180,130 @@ class CLITests(unittest.TestCase):
         self.assertTrue(result["isError"], response)
         self.assertEqual(result["structuredContent"]["error"]["code"], "MCP_SERVER_BUSY")
 
-    def test_plan_command_handles_bom_parse_error_without_stdout_crash(self) -> None:
+    def test_mcp_apply_supports_chinese_output_path(self) -> None:
+        server = HDocxMcpServer()
+        root = TMP / "mcp-chinese-output"
+        root.mkdir()
+        input_docx = root / "input.docx"
+        _make_minimal_docx(input_docx)
+        export_response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_export",
+                    "arguments": {"root": str(root), "input": "input.docx", "out": "work.hdocx", "force": True},
+                },
+            }
+        )
+        self.assertFalse(export_response["result"]["isError"], export_response)
+
+        apply_response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_apply",
+                    "arguments": {
+                        "root": str(root),
+                        "bundle": "work.hdocx",
+                        "out": "课程论文_人工智能高速发展对人类社会的影响3(1)_同济格式.docx",
+                    },
+                },
+            }
+        )
+
+        self.assertFalse(apply_response["result"]["isError"], apply_response)
+        self.assertTrue((root / "课程论文_人工智能高速发展对人类社会的影响3(1)_同济格式.docx").exists())
+
+    def test_mcp_stdio_accepts_utf8_chinese_paths_with_legacy_stdio_env(self) -> None:
+        root = TMP / "mcp-stdio-chinese-output"
+        root.mkdir()
+        input_docx = root / "input.docx"
+        _make_minimal_docx(input_docx)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(ROOT / "src")
+        env["PYTHONIOENCODING"] = "cp936:surrogateescape"
+        output_name = "中文输出测试.docx"
+        messages = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "tests", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_export",
+                    "arguments": {"root": str(root), "input": "input.docx", "out": "work.hdocx", "force": True},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_apply",
+                    "arguments": {"root": str(root), "bundle": "work.hdocx", "out": output_name},
+                },
+            },
+        ]
+        stdin = ("\n".join(json.dumps(item, ensure_ascii=False) for item in messages) + "\n").encode("utf-8")
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "html_docx.mcp_server"],
+            input=stdin,
+            capture_output=True,
+            env=env,
+            cwd=ROOT,
+            timeout=20,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", errors="replace"))
+        responses = [json.loads(line) for line in proc.stdout.decode("utf-8").splitlines() if line.strip()]
+        self.assertEqual([item["id"] for item in responses], [1, 2, 3])
+        self.assertFalse(responses[2]["result"]["isError"], responses[2])
+        self.assertTrue((root / output_name).exists())
+
+    def test_mcp_rejects_surrogate_path_as_structured_encoding_error(self) -> None:
+        server = HDocxMcpServer()
+        root = TMP / "mcp-bad-path"
+        root.mkdir()
+        input_docx = root / "input.docx"
+        _make_minimal_docx(input_docx)
+        export_response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_export",
+                    "arguments": {"root": str(root), "input": "input.docx", "out": "work.hdocx", "force": True},
+                },
+            }
+        )
+        self.assertFalse(export_response["result"]["isError"], export_response)
+        response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_apply",
+                    "arguments": {
+                        "root": str(root),
+                        "bundle": "work.hdocx",
+                        "out": "bad\udc80.docx",
+                    },
+                },
+            }
+        )
+
+        self.assertTrue(response["result"]["isError"], response)
+        self.assertEqual(response["result"]["structuredContent"]["error"]["code"], "PATH_ENCODING_ERROR")
+
+    def test_plan_command_accepts_bom_and_comma_selector_list(self) -> None:
         input_docx = TMP / "input.docx"
         work = TMP / "work.hdocx"
         _make_minimal_docx(input_docx)
@@ -189,10 +317,11 @@ class CLITests(unittest.TestCase):
         with redirect_stdout(stdout):
             code = main(["plan", str(work)])
 
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 0)
         report = json.loads(stdout.getvalue())
-        self.assertFalse(report["ok"], report)
-        self.assertEqual(report["errors"][0]["code"], "HCSS_PARSE_UNSUPPORTED_SYNTAX")
+        self.assertTrue(report["ok"], report)
+        self.assertTrue(report["patches"], report)
+        self.assertEqual(report["patches"][0]["operation"], "patch-run")
 
     def test_audit_report_file_contains_advanced_object_summary(self) -> None:
         input_docx = TMP / "audit-features.docx"
@@ -238,41 +367,6 @@ class CLITests(unittest.TestCase):
         batch_report = json.loads(batch_report_path.read_text(encoding="utf-8"))
         self.assertEqual(fixture_report["count"], 6)
         self.assertEqual(batch_report["summary"], {"failed": 0, "passed": 6, "total": 6})
-
-    def test_render_check_allow_missing_is_structured(self) -> None:
-        input_docx = TMP / "input.docx"
-        report_path = TMP / "render.json"
-        old_path = os.environ.get("PATH")
-        _make_minimal_docx(input_docx)
-        try:
-            os.environ["PATH"] = ""
-            with redirect_stdout(StringIO()):
-                self.assertEqual(
-                    main(
-                        [
-                            "render-check",
-                            str(input_docx),
-                            "--out",
-                            str(TMP / "render-out"),
-                            "--force",
-                            "--allow-missing",
-                            "--report",
-                            str(report_path),
-                        ]
-                    ),
-                    0,
-                )
-        finally:
-            if old_path is None:
-                os.environ.pop("PATH", None)
-            else:
-                os.environ["PATH"] = old_path
-
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        self.assertTrue(report["ok"], report)
-        self.assertEqual(report["command"], "render-check")
-        self.assertFalse(report["available"])
-        self.assertEqual(report["status"], "renderer-missing")
 
     def test_batch_check_runs_directory_acceptance(self) -> None:
         input_dir = TMP / "inputs"
@@ -367,6 +461,7 @@ class CLITests(unittest.TestCase):
         self.assertIn("hdocx_guidance", tool_names)
         self.assertFalse(responses[2]["result"]["isError"])
         self.assertTrue(responses[2]["result"]["structuredContent"]["ok"])
+        self.assertIn("guidance_source_path", responses[2]["result"]["structuredContent"]["mcp"])
 
     def test_mcp_create_tool_creates_and_exports_docx(self) -> None:
         from html_docx.mcp_server import HDocxMcpServer
@@ -403,6 +498,58 @@ class CLITests(unittest.TestCase):
         self.assertEqual(payload["export"]["command"], "export")
         self.assertTrue((root / "created.docx").exists())
         self.assertTrue((root / "created.hdocx" / "manifest.json").exists())
+
+    def test_mcp_plan_supports_paragraph_structure_empty_line(self) -> None:
+        from html_docx.mcp_server import HDocxMcpServer
+
+        server = HDocxMcpServer()
+        root = TMP / "mcp-paragraph-structure"
+        root.mkdir()
+        input_docx = root / "input.docx"
+        _make_minimal_docx(input_docx)
+        export_response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_export",
+                    "arguments": {"root": str(root), "input": "input.docx", "out": "work.hdocx", "force": True},
+                },
+            }
+        )
+        self.assertFalse(export_response["result"]["isError"], export_response)
+        (root / "work.hdocx" / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+.hdocx-p[data-hdocx-id="p-000001"] {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan_response = server.handle_message(
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "hdocx_plan",
+                    "arguments": {"root": str(root), "bundle": "work.hdocx"},
+                },
+            }
+        )
+
+        self.assertFalse(plan_response["result"]["isError"], plan_response)
+        payload = plan_response["result"]["structuredContent"]
+        self.assertEqual(payload["patches"][0]["operation"], "insert-empty-paragraph-after")
+        self.assertEqual(payload["hcss"]["rules"][0]["mode"], "paragraph-structure")
 
     def test_mcp_exposes_guidance_resources_prompts_and_tool(self) -> None:
         from html_docx.mcp_server import HDocxMcpServer
@@ -467,6 +614,9 @@ class CLITests(unittest.TestCase):
         payload = guidance["result"]["structuredContent"]
         self.assertTrue(payload["ok"])
         self.assertIn("@hdocx-set", payload["guidance"])
+        self.assertIn("@hdocx-edit mode(paragraph-structure)", payload["guidance"])
+        self.assertIn("hdocx-insert-empty-paragraph-after", payload["guidance"])
+        self.assertIn("guidanceRuntime", payload)
 
     def test_mcp_rejects_paths_outside_root(self) -> None:
         from html_docx.mcp_server import HDocxMcpServer

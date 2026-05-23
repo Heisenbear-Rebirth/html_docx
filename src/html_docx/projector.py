@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import posixpath
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Mapping
@@ -12,7 +13,10 @@ from .utils import sha256_bytes
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 M_NS = "http://schemas.openxmlformats.org/officeDocument/2006/math"
 WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
-NS = {"w": W_NS, "m": M_NS, "wp": WP_NS}
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+NS = {"w": W_NS, "m": M_NS, "wp": WP_NS, "a": A_NS, "r": R_NS}
 
 
 def _tag(local: str) -> str:
@@ -280,6 +284,22 @@ def _drawing_properties(run: ET.Element) -> dict[str, str]:
     return props
 
 
+def _drawing_preview(run: ET.Element, relationships: Mapping[str, dict[str, str]], part_path: str) -> dict[str, str]:
+    drawing = run.find("w:drawing", NS)
+    if drawing is None:
+        return {}
+    blip = drawing.find(".//a:blip", NS)
+    if blip is None:
+        return {}
+    relationship_id = blip.attrib.get(f"{{{R_NS}}}embed")
+    if not relationship_id:
+        return {}
+    target_part = relationships.get(part_path, {}).get(relationship_id)
+    if not target_part or not target_part.startswith("/word/media/"):
+        return {}
+    return {"src": "parts/" + target_part.lstrip("/")}
+
+
 def _run_properties(run: ET.Element) -> dict[str, str]:
     return _rpr_properties(run.find("w:rPr", NS))
 
@@ -383,6 +403,7 @@ def project_main_document(parts_dir: Path) -> tuple[str, dict[str, Any]]:
         "cellIndex": 0,
         "protectedIndex": 0,
         "numberingDefinitions": load_numbering_definitions(parts_dir),
+        "relationships": _load_relationships(parts_dir),
     }
     articles: list[str] = []
 
@@ -410,6 +431,7 @@ def project_docx_entries(entry_bytes: Mapping[str, bytes]) -> tuple[str, dict[st
         "cellIndex": 0,
         "protectedIndex": 0,
         "numberingDefinitions": load_numbering_definitions_from_bytes(entry_bytes.get("word/numbering.xml")),
+        "relationships": _load_relationships_from_entries(entry_bytes),
     }
     document_xml = entry_bytes.get("word/document.xml")
     if document_xml is None:
@@ -481,6 +503,64 @@ def _secondary_part_paths(parts_dir: Path) -> list[Path]:
         elif name in {"footnotes.xml", "endnotes.xml", "comments.xml"}:
             candidates.append(child)
     return sorted(candidates, key=lambda path: path.name)
+
+
+def _load_relationships(parts_dir: Path) -> dict[str, dict[str, str]]:
+    relationships: dict[str, dict[str, str]] = {}
+    for rels_path in parts_dir.glob("**/_rels/*.rels"):
+        source_entry = _source_entry_from_rels_path(rels_path.relative_to(parts_dir).as_posix())
+        if source_entry is None:
+            continue
+        rels = _relationships_from_xml(rels_path.read_bytes(), source_entry)
+        if rels:
+            relationships["/" + source_entry] = rels
+    return relationships
+
+
+def _load_relationships_from_entries(entry_bytes: Mapping[str, bytes]) -> dict[str, dict[str, str]]:
+    relationships: dict[str, dict[str, str]] = {}
+    for entry_name, data in entry_bytes.items():
+        if "/_rels/" not in entry_name or not entry_name.endswith(".rels"):
+            continue
+        source_entry = _source_entry_from_rels_path(entry_name)
+        if source_entry is None:
+            continue
+        rels = _relationships_from_xml(data, source_entry)
+        if rels:
+            relationships["/" + source_entry] = rels
+    return relationships
+
+
+def _source_entry_from_rels_path(rels_entry: str) -> str | None:
+    marker = "/_rels/"
+    if marker not in rels_entry or not rels_entry.endswith(".rels"):
+        return None
+    prefix, rel_name = rels_entry.split(marker, 1)
+    if "/" in rel_name:
+        return None
+    return posixpath.join(prefix, rel_name[:-5])
+
+
+def _relationships_from_xml(data: bytes, source_entry: str) -> dict[str, str]:
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return {}
+    source_dir = posixpath.dirname(source_entry)
+    relationships: dict[str, str] = {}
+    for rel in root.findall(f"{{{PKG_REL_NS}}}Relationship"):
+        relationship_id = rel.attrib.get("Id")
+        target = rel.attrib.get("Target")
+        if not relationship_id or not target or rel.attrib.get("TargetMode") == "External":
+            continue
+        if target.startswith("/"):
+            target_entry = posixpath.normpath(target.lstrip("/"))
+        else:
+            target_entry = posixpath.normpath(posixpath.join(source_dir, target))
+        if target_entry.startswith("../") or target_entry == "..":
+            continue
+        relationships[relationship_id] = "/" + target_entry
+    return relationships
 
 
 def _project_children(
@@ -723,6 +803,7 @@ def _project_paragraph(
         text = _run_text(run)
         properties = _run_properties(run)
         drawing_properties = _drawing_properties(run)
+        drawing_preview = _drawing_preview(run, context.get("relationships", {}), part_path)
         text_nodes = [child for child in list(run) if child.tag == _tag("t")]
         simple_editable = lock == "editable" and len(text_nodes) == 1 and len(list(run)) in {1, 2}
         if len(list(run)) == 2 and list(run)[0].tag != _tag("rPr"):
@@ -745,6 +826,7 @@ def _project_paragraph(
             "text": text,
             "properties": properties,
             "objectProperties": drawing_properties,
+            "objectPreview": drawing_preview,
             "textHash": sha256_bytes(text.encode("utf-8")),
             "hash": sha256_bytes(ET.tostring(run, encoding="utf-8")),
             "children": [],
@@ -757,14 +839,46 @@ def _project_paragraph(
             f' data-hdocx-{name}="{html.escape(value, quote=True)}"'
             for name, value in sorted(drawing_properties.items())
         )
+        content = _run_html_content(text, drawing_properties, drawing_preview)
         lines.append(
             f'{indent}  <span class="hdocx-r hlock-{lock}" data-hdocx-type="run" '
             f'data-hdocx-id="{r_id}" data-hdocx-lock="{lock}" '
             f'data-hdocx-part="{html.escape(part_path, quote=True)}"{property_attrs}{object_property_attrs}>'
-            f"{html.escape(text)}</span>"
+            f"{content}</span>"
         )
     lines.append(f"{indent}</p>")
     return p_id
+
+
+def _run_html_content(text: str, drawing_properties: dict[str, str], drawing_preview: dict[str, str]) -> str:
+    if not drawing_preview.get("src"):
+        return html.escape(text)
+    label = f'<span class="hdocx-drawing-text" hidden>{html.escape(text)}</span>'
+    alt = html.escape(drawing_properties.get("alt", ""), quote=True)
+    src = html.escape(drawing_preview["src"], quote=True)
+    style = _image_preview_style(drawing_properties)
+    style_attr = f' style="{style}"' if style else ""
+    return f'{label}<img class="hdocx-image-preview" src="{src}" alt="{alt}"{style_attr}>'
+
+
+def _image_preview_style(drawing_properties: dict[str, str]) -> str:
+    width = _emu_to_css_px(drawing_properties.get("width-emu"))
+    height = _emu_to_css_px(drawing_properties.get("height-emu"))
+    styles = []
+    if width is not None:
+        styles.append(f"width: {width}px")
+    if height is not None:
+        styles.append(f"height: {height}px")
+    if styles:
+        styles.append("object-fit: contain")
+    return "; ".join(styles)
+
+
+def _emu_to_css_px(raw_emu: str | None) -> str | None:
+    if not raw_emu or not raw_emu.isdigit():
+        return None
+    pixels = int(raw_emu) * 96 / 914400
+    return f"{pixels:g}"
 
 
 def _project_protected_inline(

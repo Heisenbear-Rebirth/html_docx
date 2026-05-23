@@ -52,7 +52,7 @@ work.hdocx/
 其中：
 
 - `document.html` 是 agent 主要阅读和修改的 HTML-like 投影。
-- `agent.edits.hcss` 是项目自定义的 H-CSS，用来表达字号、缩进、行距、对齐、列表等受控格式修改。
+- `agent.edits.hcss` 是项目自定义的 H-CSS，用来表达字号、缩进、行距、对齐、列表、真实空行等受控格式或结构修改。
 - `manifest.json` 是内部索引与校验信息，不应手动编辑。
 - `original/original.docx` 是原始文件副本，不应手动编辑。
 - `parts/` 保存原始 OOXML 与媒体，用于精确回写。
@@ -88,14 +88,42 @@ H-CSS 不是浏览器 CSS。所有格式声明都必须使用 `hdocx-` 前缀；
   hdocx-eastAsia-font: "SimSun";
   hdocx-font-size: 10.5pt;
 }
+
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+
+@hdocx-edit mode(image-formatting);
+
+#r-000001 {
+  hdocx-width-emu: 1828800;
+  hdocx-height-emu: 914400;
+  hdocx-paragraph-line-spacing: 1;
+}
 ```
 
 当前支持的段落声明包括：`hdocx-text-align`/`hdocx-align`、
 `hdocx-first-line-indent`、`hdocx-line-spacing`、`hdocx-line-spacing-exact`、
-`hdocx-space-before`、`hdocx-space-after`。当前支持的 run 声明包括：
+`hdocx-space-before`、`hdocx-space-after`、`hdocx-manual-page-break-before`。
+真实空行应使用 `@hdocx-edit mode(paragraph-structure);`，支持
+`hdocx-insert-empty-paragraph-before`、`hdocx-insert-empty-paragraph-after`、
+`hdocx-empty-paragraph-style-id`、`hdocx-empty-paragraph-line-spacing`、
+`hdocx-empty-paragraph-line-spacing-exact`、`hdocx-empty-paragraph-space-before`、
+`hdocx-empty-paragraph-space-after`；`diff` 会通过 `emptyParagraphDiff`
+报告这类结构变化。
+当前支持的 run 声明包括：
 `hdocx-font-family`、`hdocx-eastAsia-font`/`hdocx-east-asia-font`、
 `hdocx-ascii-font`、`hdocx-hansi-font`、`hdocx-cs-font`、`hdocx-font-size`、
 `hdocx-bold`、`hdocx-italic`、`hdocx-color`。
+已有图片应使用 `@hdocx-edit mode(image-formatting);`，支持
+`hdocx-alt`、`hdocx-width-emu`、`hdocx-height-emu`，以及
+`hdocx-paragraph-*` 形式的图片所在段落行距、段距和对齐声明。图片被固定行距裁切时，
+优先设置 `hdocx-paragraph-line-spacing: 1`。
 
 高级对象如公式、字段、批注、修订、SmartArt、OLE、AlternateContent 等默认受保护。只有存在专门支持的编辑模式时才可以改。
 
@@ -158,10 +186,13 @@ python -m html_docx check input.docx --work check.hdocx --out checked.docx --for
 $env:PYTHONPATH = "src"
 python -m html_docx audit input.docx --report audit.json
 python -m html_docx export input.docx --out work.hdocx --force
+python -m html_docx query work.hdocx --text "Keywords"
+python -m html_docx find work.hdocx --kind image
 python -m html_docx inspect work.hdocx --kind node --id p-000001
 python -m html_docx plan work.hdocx --report plan.json
 python -m html_docx apply work.hdocx --out output.docx --report apply.json
 python -m html_docx diff input.docx output.docx --report diff.json
+python -m html_docx assert work.hdocx --assertion text-payload-unchanged
 ```
 
 Agent 修改前应先 inspect 目标节点、样式、列表、表格或图片，避免使用过宽选择器。
@@ -173,6 +204,10 @@ H-CSS 支持命名集合，方便 agent 避免重复书写：
 ```css
 @hdocx-set body-style {
   select: style(BodyText);
+}
+
+@hdocx-set selected-body {
+  select: id(p-000007), id(p-000008), id(p-000009);
 }
 
 @hdocx-set first-level-list {
@@ -193,6 +228,11 @@ H-CSS 支持命名集合，方便 agent 避免重复书写：
 }
 ```
 
+逗号分隔的 selector list 可用于普通规则，也可用于 `@hdocx-set` 的
+`select` 声明。不要通过修改 `document.html` 添加自定义 class 来分组；
+这会改变投影元数据，应改在 `agent.edits.hcss` 中使用命名集合或 selector
+list。
+
 ### 5. 压力测试
 
 修改转换逻辑后运行：
@@ -211,17 +251,6 @@ python -m html_docx batch-check pressure-fixtures --work pressure-work --out pre
 - 页眉、脚注、图片。
 - 批注、修订、公式。
 - 高级受保护对象。
-
-### 6. 可选渲染 QA
-
-如果系统 PATH 中存在 LibreOffice/soffice，可以运行：
-
-```powershell
-$env:PYTHONPATH = "src"
-python -m html_docx render-check output.docx --out render-out --force --allow-missing --report render.json
-```
-
-如果报告为 `renderer-missing`，表示外部渲染器不可用，不代表核心双射失败。
 
 ## Agent 使用规则
 
@@ -257,7 +286,6 @@ Agent 不得编辑：
 - 检查某个 DOCX 双射：运行 `check`。
 - 做了编辑：运行 `apply` 和 `diff`，确认只有预期变化。
 - 修改转换核心：运行压力 fixture 的 `batch-check`。
-- 修改排版且有渲染器：运行 `render-check`。
 
 不得只凭“看起来能打开”宣称成功。
 

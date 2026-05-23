@@ -61,6 +61,7 @@ Updated: 2026-05-22
 - Image size edits via existing DrawingML `wp:extent` EMU values.
 - Controlled replacement of existing `word/media/*` package entries from the extracted `parts/` tree.
 - Controlled new image insertion through `@hdocx-insert-image after(...)` and `before(...)`, including media entry creation, the target part `.rels`, and `[Content_Types].xml` updates.
+- Existing image formatting through `@hdocx-edit mode(image-formatting)`, including alt text, EMU size, and host paragraph spacing/alignment.
 - Non-media `parts/` modifications are rejected instead of silently applied.
 - Numbering/list definition edits through `@hdocx-edit mode(numbering-definition)`.
 - New single-level and multi-level list definition creation through `@hdocx-list`, including controlled creation of `word/numbering.xml` when missing.
@@ -71,6 +72,7 @@ Updated: 2026-05-22
 - Controlled comment body text edits through `@hdocx-edit mode(comment-text)`.
 - Controlled revision accept/reject actions through `@hdocx-edit mode(revision-action)`.
 - Controlled whole-equation replacement through `@hdocx-edit mode(equation-omml)` using bundle-local OMML source files.
+- Controlled structural blank-line insertion through `@hdocx-edit mode(paragraph-structure)`, with per-empty-paragraph spacing.
 - Grouped part writeback: only modified ZIP entries are replaced.
 
 ### H-CSS V1
@@ -83,6 +85,7 @@ Supports:
 - `@hdocx-include`
 - `@hdocx-edit mode(paragraph-formatting)`
 - `@hdocx-edit mode(all-runs)`
+- `@hdocx-edit mode(image-formatting)`
 - `@hdocx-edit mode(direct-formatting)`
 - `@hdocx-edit mode(style-definition)`
 - `@hdocx-edit mode(numbering-definition)`
@@ -91,6 +94,7 @@ Supports:
 - `@hdocx-edit mode(comment-text)`
 - `@hdocx-edit mode(revision-action)`
 - `@hdocx-edit mode(equation-omml)`
+- `@hdocx-edit mode(paragraph-structure)`
 - `@hdocx-style StyleId`
 - `@hdocx-delete-style(StyleId)`
 - `@hdocx-list ListId`
@@ -108,6 +112,7 @@ Current H-CSS behavior:
 - Explicit formatting declaration contract for common academic layout:
   - run: font family, Latin script fonts, East Asian fonts, complex-script fonts, font size, bold, italic, color.
   - paragraph: alignment, first-line indent, exact or multiple line spacing, space before, space after.
+  - paragraph structure: manual page breaks and real empty paragraphs with optional style, line spacing, space before, and space after.
 - `plan` returns H-CSS diagnostics with selector matches, declaration support, normalized values, OOXML mappings, line numbers, per-rule errors, and generated patch ids.
 - Direct `#node-id` selectors.
 - `.class` selectors.
@@ -127,6 +132,8 @@ Current H-CSS behavior:
 - Accepting/rejecting insert/delete revision wrappers through a dedicated protected-node mode.
 - Replacing a protected equation with validated OMML from a bundle-local file.
 - Inserting images into projected Word XML parts, including headers/footers/notes where a paragraph target is available.
+- Formatting existing projected images and their host paragraphs to avoid inline-image clipping from exact line spacing.
+- Inserting idempotent structural empty paragraphs before or after target paragraphs.
 - Zero-match selectors fail.
 - `allow-empty: true` sets do not fail when they match nothing.
 - Protected matches fail.
@@ -144,20 +151,28 @@ python -m html_docx diff input.docx output.docx --report diff.json
 python -m html_docx audit input.docx --report audit.json
 python -m html_docx inspect work.hdocx --kind node --id p-000001
 python -m html_docx inspect work.hdocx --kind style --id Normal
+python -m html_docx query work.hdocx --text "Keywords"
+python -m html_docx find work.hdocx --kind image
+python -m html_docx assert work.hdocx --assertion text-payload-unchanged
 python -m html_docx roundtrip input.docx --work work.hdocx --out roundtrip.docx
 python -m html_docx check input.docx --work check.hdocx --out checked.docx --force --report check.json
 python -m html_docx batch-check fixtures --work pressure-work --out pressure-out --force --report pressure.json
 python -m html_docx generate-fixtures --out pressure-fixtures --force --report pressure-fixtures.json
-python -m html_docx render-check input.docx --out render-out --force --allow-missing --report render.json
 python -m html_docx doctor
 ```
 
 Inspection supports `node`, `style`, `list`, `table`, and `image`.
+`query` / `find` locate nodes by text, style id, run font properties,
+paragraph properties, image presence, and likely level-1 heading heuristics.
+`assert` runs assertion-style checks such as unchanged text payload, required
+empty paragraphs, and image host paragraphs that must not use exact line
+spacing. Assertion objects can set `afterApply` / `plannedOutput` to validate a
+bundle-local post-apply re-export, and level-1 heading assertions support
+`includeRegex`, `excludeRegex`, and default front-matter exclusions.
 `check` runs export/apply/diff acceptance for one DOCX.
 `batch-check` runs the same acceptance chain over a single DOCX or a directory of DOCX files.
 `audit` reports protected/high-risk DOCX structures and the project policy for each detected feature.
 `generate-fixtures` creates a local synthetic pressure DOCX suite.
-`render-check` optionally renders DOCX to PDF with LibreOffice/soffice using a profile inside the output directory; with `--allow-missing`, missing renderers are reported without failing local delivery.
 
 ### Report And Diff
 
@@ -173,6 +188,7 @@ Inspection supports `node`, `style`, `list`, `table`, and `image`.
   - ZIP timestamp
 - `diff` includes `semanticDiff`, an in-memory H-DOCX projection comparison with node counts, changed node ids, added/removed node ids, and field-level node changes.
 - `semanticDiff` distinguishes document semantic changes from media-only binary replacement.
+- `diff` includes `manualPageBreakDiff` and `emptyParagraphDiff` for explicit structural insertions, while semantic alignment prevents following text from being misreported as changed.
 - `diff` includes `fragmentDiff`, with byte-range change windows per changed/added/removed package entry and linked H-DOCX node ids when the entry is projected.
 - `apply` includes a patch summary grouped by entry and operation.
 - `apply` patch summaries include risk classes such as `fragment-preserving-eligible`, `xml-entry-reserialize`, `package-metadata`, `structural-insert`, and `binary-package-entry`.
@@ -184,7 +200,7 @@ Inspection supports `node`, `style`, `list`, `table`, and `image`.
 Current automated tests:
 
 ```text
-81 tests passing
+101 tests passing
 ```
 
 Coverage includes:
@@ -197,11 +213,18 @@ Coverage includes:
 - Run split.
 - Paragraph formatting patch.
 - H-CSS paragraph formatting.
+- H-CSS structural empty paragraph insertion with per-empty-paragraph spacing and idempotence.
+- Structured `query` / `find` for text, font/size/alignment, likely level-1 headings, images, and host paragraphs.
+- Assertion checks for unchanged text payload, required empty paragraphs, and image host exact line-spacing failures.
+- Assertion `afterApply` planned-output checks with original-to-planned paragraph id mapping.
+- Level-1 heading assertion front-matter excludes plus include/exclude regex filters.
 - H-CSS token/format/include/all-runs.
 - H-CSS paper-format declaration contract and OOXML mapping.
 - H-CSS unsupported declaration diagnostics with line numbers.
 - H-CSS run-level class+attribute selectors, UTF-8 BOM handling, and set aliases.
-- H-CSS comma grouping selector parse errors without MCP/CLI transport failure.
+- H-CSS comma selector lists in rules and `@hdocx-set` aliases.
+- H-CSS manual page-break insertion before target paragraphs with semantic diff alignment.
+- MCP/CLI structured path-encoding errors for unsafe output paths.
 - H-CSS `#node-id`, `.class`, and `allow-empty` selector behavior.
 - H-CSS function selector behavior for type, style, list, and part targeting.
 - H-CSS style-definition patch.
@@ -240,7 +263,7 @@ Coverage includes:
 - CLI report file output.
 - CLI classified inspect output.
 - CLI doctor, check, and batch-check output.
-- CLI generate-fixtures and render-check output.
+- CLI generate-fixtures output.
 - Structured DOCX diff report output.
 - Semantic node diff report output.
 - Fragment-level diff report output.
@@ -256,7 +279,6 @@ Coverage includes:
 - Image support covers alt text, existing `wp:extent` size metadata, existing media entry replacement, and before/after new image insertion into projected Word XML parts.
 - Comments, insert/delete revision wrappers, and equations have limited controlled edit actions; charts, SmartArt, and OLE are audited and primarily protected/preserved, not semantically editable.
 - Built-in synthetic pressure fixtures can be generated locally; real-world private DOCX corpora still need to be supplied by the user when broader validation is required.
-- Render QA is optional and depends on a system LibreOffice/soffice executable. The project detects availability but does not install or configure a renderer.
 - H-CSS parser is a small V1 parser, not a full CSS parser.
 - Large real-world DOCX pressure fixtures are not bundled yet; `batch-check` and `PRESSURE_FIXTURES.md` are available for local fixture directories.
 
@@ -264,4 +286,4 @@ Coverage includes:
 
 1. Real academic DOCX fixture pressure tests with local private fixture directories.
 2. Broader semantic editing for selected advanced objects only where strict preservation can be proven.
-3. Optional visual PDF/page-image comparison once a renderer is available.
+3. Broader assertion coverage for paper-specific layout invariants.

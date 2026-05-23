@@ -46,18 +46,16 @@ controlled edits, and agent workflows.
 
 Current local validation at the time of this release:
 
-- `81` unit tests passing.
+- `101` unit tests passing.
 - Built-in pressure fixture round-trip: `6/6` byte-identical.
 - Real sample round-trip: byte-identical and semantically identical.
 - MCP stdio smoke test passing.
-- Optional render QA is supported when LibreOffice/soffice is available.
 
 ## Requirements
 
 - Windows PowerShell for the bundled installer script.
 - Python `>=3.11`.
 - No Python runtime dependencies are required by the package itself.
-- Optional: LibreOffice/soffice on `PATH` for render-based QA.
 
 The project is designed to avoid global Python package installation. Use a local
 workspace `.venv`, or the user-level isolated installer described below.
@@ -221,12 +219,14 @@ Important rules:
 
 | Command | Purpose |
 | --- | --- |
-| `doctor` | Report runtime capabilities and optional renderer availability. |
+| `doctor` | Report runtime capabilities. |
 | `create` | Create a new canonical DOCX, optionally exporting it to H-DOCX. |
 | `audit` | Detect high-risk DOCX structures and preservation policies. |
 | `export` | Convert a DOCX into an H-DOCX bundle. |
 | `validate` | Validate an H-DOCX bundle before applying it. |
 | `inspect` | Inspect nodes, styles, lists, tables, or images by id. |
+| `query` / `find` | Return structured matches by text, style, font, paragraph formatting, image presence, or likely level-1 headings. |
+| `assert` | Run assertion-style acceptance checks over a bundle. |
 | `plan` | Plan edits without writing a DOCX. |
 | `apply` | Apply a bundle back to DOCX. |
 | `diff` | Compare two DOCX packages with package, semantic, and fragment reports. |
@@ -234,10 +234,50 @@ Important rules:
 | `check` | Run export/apply/diff acceptance for one DOCX. |
 | `batch-check` | Run `check` over a file or directory. |
 | `generate-fixtures` | Generate synthetic pressure DOCX fixtures. |
-| `render-check` | Optionally render DOCX through LibreOffice/soffice. |
 | `mcp` | Run the stdio MCP server. |
 
 The package also installs a dedicated `html-docx-mcp` command for MCP clients.
+
+## Structured Query And Assertions
+
+Prefer `query`/`find` over reading `document.html` when locating targets. It
+returns JSON from the projection manifest, including host paragraphs for image
+runs and effective style-inherited formatting where available.
+
+```powershell
+html-docx query work.hdocx --text "Keywords"
+html-docx query work.hdocx --align center --font-size 14pt --font-family SimHei --suspected-heading-level1
+html-docx find work.hdocx --kind image
+```
+
+Use `assert` for post-edit checks that agents otherwise tend to script by hand:
+
+```powershell
+html-docx assert work.hdocx --assertion text-payload-unchanged
+html-docx assert work.hdocx --assertion images-host-paragraph-not-exact-line-spacing
+html-docx assert work.hdocx --assertions-json "[{\"type\":\"paragraphs-have-empty-before\",\"paragraphIds\":[\"p-000006\"]}]"
+html-docx assert work.hdocx --assertions-json "[{\"type\":\"paragraphs-have-empty-before\",\"paragraphIds\":[\"p-000006\"],\"afterApply\":true}]"
+```
+
+Supported built-in assertions are:
+
+- `text-payload-unchanged`
+- `paragraphs-have-empty-before`
+- `paragraphs-have-empty-after`
+- `images-host-paragraph-not-exact-line-spacing`
+- `level1-headings-have-empty-paragraph-before`
+
+By default, structure and formatting assertions inspect the current exported
+bundle. Set `afterApply: true` or `plannedOutput: true` on an assertion object
+to apply the planned edits to a bundle-local scratch DOCX, export it again, and
+check that planned output state. `text-payload-unchanged` normally checks the
+planned patch list; with `afterApply: true`, it compares the original and
+planned-output text payloads.
+
+`level1-headings-have-empty-paragraph-before` uses a heading heuristic. It
+supports `includeRegex` and `excludeRegex`, and by default excludes front-matter
+labels such as abstract, contents/table of contents, and keywords. Set
+`useDefaultExcludes: false` when those labels are intentional targets.
 
 ## H-CSS Examples
 
@@ -277,10 +317,53 @@ Supported paragraph declarations:
 | `hdocx-line-spacing-exact` | positive `pt` | `w:pPr/w:spacing @w:lineRule="exact"` |
 | `hdocx-space-before` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing @w:before` or `@w:beforeLines` |
 | `hdocx-space-after` | `0`, non-negative `pt`, or `line` | `w:pPr/w:spacing @w:after` or `@w:afterLines` |
+| `hdocx-manual-page-break-before` | `true` or `false` | inserts an idempotent manual page-break paragraph before the target paragraph |
+
+### Paragraph Structure
+
+Use `@hdocx-edit mode(paragraph-structure);` when the required output is a real
+Word structural paragraph, not just visual spacing on an existing paragraph.
+This is the mode for blank lines. `plan` reports structural operations such as
+`insert-empty-paragraph-after`; `apply` skips insertion if the neighboring blank
+paragraph already exists; `diff` reports blank-line changes under
+`emptyParagraphDiff` and aligns later semantic nodes so unchanged text is not
+misreported as edited.
+
+```css
+@hdocx-edit mode(paragraph-structure);
+
+#p-000010 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+```
+
+Supported paragraph-structure declarations:
+
+| Declaration | Value | OOXML mapping |
+| --- | --- | --- |
+| `hdocx-insert-empty-paragraph-before` | `true` or `false` | inserts an idempotent empty `<w:p>` before the target paragraph |
+| `hdocx-insert-empty-paragraph-after` | `true` or `false` | inserts an idempotent empty `<w:p>` after the target paragraph |
+| `hdocx-empty-paragraph-style-id` | existing simple style id | inserted empty paragraph `w:pPr/w:pStyle @w:val` |
+| `hdocx-empty-paragraph-line-spacing` | positive multiple or exact `pt` | inserted empty paragraph `w:pPr/w:spacing` |
+| `hdocx-empty-paragraph-line-spacing-exact` | positive `pt` | inserted empty paragraph `w:pPr/w:spacing @w:lineRule="exact"` |
+| `hdocx-empty-paragraph-space-before` | `0`, non-negative `pt`, or `line` | inserted empty paragraph `w:pPr/w:spacing @w:before` or `@w:beforeLines` |
+| `hdocx-empty-paragraph-space-after` | `0`, non-negative `pt`, or `line` | inserted empty paragraph `w:pPr/w:spacing @w:after` or `@w:afterLines` |
+
+Use paragraph spacing (`hdocx-space-before` / `hdocx-space-after`) when the
+document only needs visual separation. Use paragraph structure when Word should
+contain a real blank paragraph that can have its own line spacing and paragraph
+spacing.
 
 ### Function Selectors
 
 ```css
+@hdocx-set target-paragraph {
+  select: id(p-000001);
+}
+
 @hdocx-set body-style {
   select: style(BodyText);
 }
@@ -296,8 +379,23 @@ Supported paragraph declarations:
 
 Selector support is intentionally small: ids, classes, exact attribute
 selectors, class+attribute compounds such as
-`.hdocx-r[data-hdocx-id="r-000001"]`, and the H-DOCX functions above. Comma
-grouping selectors are not supported; use `@hdocx-set` blocks instead.
+`.hdocx-r[data-hdocx-id="r-000001"]`, selector lists separated by commas,
+and the H-DOCX functions above.
+
+For safe grouping, keep groups in `agent.edits.hcss`; do not add custom classes
+or other projection metadata to `document.html`. A selector list may be used
+directly in a rule or inside `@hdocx-set`:
+
+```css
+@hdocx-set body {
+  select: id(p-000007), id(p-000008), id(p-000009);
+}
+
+.role-body,
+.role-reference {
+  hdocx-font-size: 10.5pt;
+}
+```
 
 ### Run Formatting
 
@@ -326,6 +424,42 @@ Supported run declarations:
 | `hdocx-italic` | `true` or `false` | `w:i` |
 | `hdocx-color` | `#RRGGBB` | `w:color @w:val` |
 
+### Image Formatting
+
+Use `@hdocx-edit mode(image-formatting);` for existing projected images. It can
+change DrawingML metadata and size, and it can also patch the host paragraph's
+spacing so inline images are not clipped by an inherited exact line spacing.
+
+```css
+@hdocx-edit mode(image-formatting);
+
+#r-000001 {
+  hdocx-width-emu: 1828800;
+  hdocx-height-emu: 914400;
+  hdocx-alt: "Scaled figure";
+  hdocx-paragraph-line-spacing: 1;
+  hdocx-paragraph-space-before: 0;
+  hdocx-paragraph-space-after: 0;
+}
+```
+
+Supported image declarations:
+
+| Declaration | Value | OOXML mapping |
+| --- | --- | --- |
+| `hdocx-alt` | quoted or bare text | `wp:docPr @descr` |
+| `hdocx-width-emu` | positive EMU integer | `wp:extent @cx` |
+| `hdocx-height-emu` | positive EMU integer | `wp:extent @cy` |
+| `hdocx-paragraph-line-spacing` | positive multiple or exact `pt` | host paragraph `w:pPr/w:spacing` |
+| `hdocx-paragraph-line-spacing-exact` | positive `pt` | host paragraph exact line spacing |
+| `hdocx-paragraph-space-before` | `0`, non-negative `pt`, or `line` | host paragraph spacing before |
+| `hdocx-paragraph-space-after` | `0`, non-negative `pt`, or `line` | host paragraph spacing after |
+| `hdocx-paragraph-text-align` / `hdocx-paragraph-align` | `left`, `center`, `right`, `justify`/`both` | host paragraph alignment |
+
+When a picture appears hidden or cropped after applying academic body line
+spacing, target the image run and set `hdocx-paragraph-line-spacing: 1` (auto
+single spacing) or another non-clipping host paragraph spacing.
+
 ### Paper Body Formatting
 
 ```css
@@ -349,6 +483,24 @@ body {
   hdocx-font-family: "Times New Roman";
   hdocx-eastAsia-font: "SimSun";
   hdocx-font-size: 10.5pt;
+}
+```
+
+### Manual Page Breaks
+
+Use `hdocx-manual-page-break-before: true` when the required output is an
+explicit manual page break, not Word's automatic `pageBreakBefore` paragraph
+property. `plan` reports this as `insert-manual-page-break-before`; `apply`
+inserts a standalone page-break paragraph before the target and skips insertion
+when the same break already exists. `diff` reports these changes under
+`manualPageBreakDiff` and aligns later semantic nodes so the target text is not
+misreported as changed merely because a break paragraph was inserted.
+
+```css
+@hdocx-edit mode(paragraph-formatting);
+
+.hdocx-p[data-hdocx-id="p-000006"] {
+  hdocx-manual-page-break-before: true;
 }
 ```
 
@@ -436,15 +588,16 @@ Add `html-docx-mcp` to `PATH`, then configure your MCP client with JSON:
 ```
 
 The MCP server provides tools such as `hdocx_create`, `hdocx_audit`, `hdocx_export`,
-`hdocx_plan`, `hdocx_apply`, `hdocx_diff`, `hdocx_check`,
-`hdocx_batch_check`, `hdocx_inspect`, `hdocx_render_check`, and
-`hdocx_guidance`.
+`hdocx_query`, `hdocx_find`, `hdocx_inspect`, `hdocx_plan`, `hdocx_apply`,
+`hdocx_diff`, `hdocx_assert`, `hdocx_check`, `hdocx_batch_check`,
+and `hdocx_guidance`.
 
 It also exposes agent-facing resources and prompts:
 
 ```text
 hdocx://guide/workflow
 hdocx://guide/writing-format
+hdocx://guide/query
 hdocx://guide/hcss
 hdocx://guide/acceptance
 hdocx://guide/edge-cases
@@ -464,9 +617,18 @@ resolve inside that root. If `root` is omitted, the server uses
 `HDOCX_MCP_ROOT`, then `CLAUDE_PROJECT_DIR`, then the MCP server current
 directory.
 
-Tool calls are intended to be serialized. If a client invokes two tools at the
-same time, the server returns structured `MCP_SERVER_BUSY` instead of risking a
-broken stdio transport.
+Tool calls are intended to be serialized. If two tool handlers overlap inside
+one server instance, the server returns structured `MCP_SERVER_BUSY` instead of
+risking a broken stdio transport. Some clients queue quick calls even when an
+agent asks for them in parallel; those calls may both succeed because they
+reached the server sequentially.
+
+`hdocx_doctor` reports the loaded module path, package version, git commit or
+module timestamp, supported H-CSS edit modes, supported H-CSS properties, stdio
+encoding, and guidance source hash. If README and MCP behavior disagree, run
+`hdocx_doctor` first to verify which code the MCP process actually loaded.
+After upgrading this project, restart the MCP client or server process; a
+long-running MCP process keeps using the code it loaded at startup.
 
 Agent-facing policy:
 
@@ -486,12 +648,6 @@ Use validation according to the risk of the task:
 - New or unknown DOCX: `html-docx audit` and `html-docx check`
 - Edited DOCX: `html-docx apply` followed by `html-docx diff`
 - Conversion logic changes: `generate-fixtures` followed by `batch-check`
-- Layout-sensitive edited output: `render-check` when LibreOffice/soffice is
-  available
-
-`render-check` is optional because it depends on an external renderer. A
-`renderer-missing` report means the renderer was not available; it does not
-invalidate byte-identical no-edit checks.
 
 ## Supported Editing Surface
 

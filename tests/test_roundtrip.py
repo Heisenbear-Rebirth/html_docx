@@ -13,10 +13,13 @@ sys.path.insert(0, str(ROOT / "src"))
 from html_docx.hdocx import (
     audit_docx,
     apply_hdocx,
+    assert_hdocx,
     create_docx,
     diff_docx,
     export_docx,
+    find_hdocx,
     plan_hdocx,
+    query_hdocx,
     roundtrip_docx,
     validate_hdocx,
 )
@@ -388,6 +391,91 @@ body {
         self.assertEqual(p_pr.find("w:jc", NS).attrib[f"{{{W_NS}}}val"], "center")
         self.assertEqual(p_pr.find("w:spacing", NS).attrib[f"{{{W_NS}}}line"], "360")
 
+    def test_hcss_set_id_function_alias_formats_paragraph(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        output_docx = TMP / "output.docx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-set title {
+  select: id(p-000001);
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+title {
+  hdocx-line-spacing-exact: 18pt;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+        apply_hdocx(work, output_docx)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["hcss"]["rules"][0]["matchedNodeIds"], ["p-000001"])
+        self.assertEqual(plan["patches"][0]["operation"], "patch-paragraph")
+        with zipfile.ZipFile(output_docx, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        spacing = root.findall(".//w:p", NS)[0].find("w:pPr/w:spacing", NS)
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}line"], "360")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}lineRule"], "exact")
+
+    def test_hcss_set_selector_list_targets_multiple_paragraphs(self) -> None:
+        input_docx = TMP / "created.docx"
+        work = TMP / "work.hdocx"
+        create_docx(input_docx, title="Title", paragraphs=["One.", "Two."], force=True)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-set body {
+  select: id(p-000002), id(p-000003);
+}
+
+@hdocx-edit mode(paragraph-formatting);
+
+body {
+  hdocx-text-align: justify;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["hcss"]["rules"][0]["matchedNodeIds"], ["p-000002", "p-000003"])
+        self.assertEqual([patch["nodeId"] for patch in plan["patches"]], ["p-000002", "p-000003"])
+
+    def test_hcss_comma_grouping_rule_targets_multiple_paragraphs(self) -> None:
+        input_docx = TMP / "created.docx"
+        work = TMP / "work.hdocx"
+        create_docx(input_docx, title="Title", paragraphs=["One.", "Two."], force=True)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-formatting);
+
+.hdocx-p[data-hdocx-id="p-000002"],
+.hdocx-p[data-hdocx-id="p-000003"] {
+  hdocx-text-align: center;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["hcss"]["rules"][0]["matchedNodeIds"], ["p-000002", "p-000003"])
+        self.assertEqual(len(plan["patches"]), 2)
+
     def test_hcss_all_runs_with_token_format_include(self) -> None:
         input_docx = TMP / "input.docx"
         work = TMP / "work.hdocx"
@@ -612,6 +700,401 @@ editable-runs {
         self.assertTrue(plan["ok"], plan)
         self.assertGreater(plan["hcss"]["rules"][0]["matchCount"], 0)
         self.assertTrue(all(node_id.startswith("r-") for node_id in plan["hcss"]["rules"][0]["matchedNodeIds"]))
+
+    def test_hcss_manual_page_break_before_paragraph(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        output_docx = TMP / "output.docx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-formatting);
+
+.hdocx-p[data-hdocx-id="p-000001"] {
+  hdocx-manual-page-break-before: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+        apply_hdocx(work, output_docx)
+        diff = diff_docx(input_docx, output_docx)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["patches"][0]["operation"], "insert-manual-page-break-before")
+        self.assertEqual(plan["hcss"]["rules"][0]["patchIds"], ["patch-000001"])
+        self.assertEqual(plan["hcss"]["rules"][0]["declarations"][0]["kind"], "structural-paragraph")
+        with zipfile.ZipFile(output_docx, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        paragraphs = root.findall(".//w:p", NS)
+        self.assertEqual(paragraphs[0].find("w:r/w:br", NS).attrib[f"{{{W_NS}}}type"], "page")
+        self.assertEqual(paragraphs[1].find("w:r/w:t", NS).text, "Hello strict roundtrip.")
+        self.assertEqual(diff["manualPageBreakDiff"]["summary"]["added"], 1)
+        self.assertEqual(diff["manualPageBreakDiff"]["added"][0]["kind"], "manual-page-break")
+        self.assertTrue(diff["semanticDiff"]["identical"], diff["semanticDiff"])
+        self.assertEqual(diff["semanticDiff"]["manualPageBreakAlignment"]["ignoredRightBreakParagraphs"], 1)
+
+    def test_hcss_manual_page_break_before_is_idempotent_when_existing(self) -> None:
+        input_docx = TMP / "input.docx"
+        first_work = TMP / "first.hdocx"
+        first_output = TMP / "first.docx"
+        second_work = TMP / "second.hdocx"
+        second_output = TMP / "second.docx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, first_work)
+        (first_work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-formatting);
+
+#p-000001 {
+  hdocx-manual-page-break-before: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        apply_hdocx(first_work, first_output)
+        export_docx(first_output, second_work)
+        (second_work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-formatting);
+
+#p-000002 {
+  hdocx-manual-page-break-before: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        apply_hdocx(second_work, second_output)
+
+        with zipfile.ZipFile(second_output, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        break_count = sum(
+            1
+            for br in root.findall(".//w:br", NS)
+            if br.attrib.get(f"{{{W_NS}}}type") == "page"
+        )
+        self.assertEqual(break_count, 1)
+
+    def test_hcss_insert_empty_paragraph_after_with_spacing(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        output_docx = TMP / "output.docx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+        apply_hdocx(work, output_docx)
+        diff = diff_docx(input_docx, output_docx)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["patches"][0]["operation"], "insert-empty-paragraph-after")
+        self.assertEqual(plan["patches"][0]["newProperties"]["line-spacing"], "12pt")
+        self.assertEqual(plan["hcss"]["rules"][0]["declarations"][0]["kind"], "structural-paragraph")
+        with zipfile.ZipFile(output_docx, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        paragraphs = root.findall(".//w:p", NS)
+        self.assertEqual(len(paragraphs), 2)
+        self.assertEqual(paragraphs[0].find("w:r/w:t", NS).text, "Hello strict roundtrip.")
+        self.assertEqual(paragraphs[1].findall(".//w:t", NS), [])
+        spacing = paragraphs[1].find("w:pPr/w:spacing", NS)
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}line"], "240")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}lineRule"], "exact")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}before"], "0")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}after"], "0")
+        self.assertEqual(diff["emptyParagraphDiff"]["summary"]["added"], 1)
+        self.assertEqual(diff["emptyParagraphDiff"]["added"][0]["kind"], "empty-paragraph")
+        self.assertTrue(diff["semanticDiff"]["identical"], diff["semanticDiff"])
+        self.assertEqual(diff["semanticDiff"]["emptyParagraphAlignment"]["ignoredRightEmptyParagraphs"], 1)
+
+    def test_hcss_insert_empty_paragraph_after_is_idempotent_when_existing(self) -> None:
+        input_docx = TMP / "input.docx"
+        first_work = TMP / "first.hdocx"
+        first_output = TMP / "first.docx"
+        second_work = TMP / "second.hdocx"
+        second_output = TMP / "second.docx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, first_work)
+        (first_work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        apply_hdocx(first_work, first_output)
+        export_docx(first_output, second_work)
+        (second_work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        apply_hdocx(second_work, second_output)
+        diff = diff_docx(first_output, second_output)
+
+        with zipfile.ZipFile(second_output, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        empty_paragraphs = [paragraph for paragraph in root.findall(".//w:p", NS) if not paragraph.findall(".//w:t", NS)]
+        empty_count = len(empty_paragraphs)
+        self.assertEqual(empty_count, 1)
+        spacing = empty_paragraphs[0].find("w:pPr/w:spacing", NS)
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}line"], "240")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}lineRule"], "exact")
+        self.assertEqual(diff["emptyParagraphDiff"]["summary"]["added"], 0)
+        self.assertEqual(diff["emptyParagraphDiff"]["summary"]["changed"], 1)
+
+    def test_hcss_insert_empty_paragraph_style_id_applies(self) -> None:
+        input_docx = TMP / "input.docx"
+        work = TMP / "work.hdocx"
+        output_docx = TMP / "output.docx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-style-id: Normal;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+        apply_hdocx(work, output_docx)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["patches"][0]["newProperties"]["style-id"], "Normal")
+        with zipfile.ZipFile(output_docx, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        p_style = root.findall(".//w:p", NS)[1].find("w:pPr/w:pStyle", NS)
+        self.assertEqual(p_style.attrib[f"{{{W_NS}}}val"], "Normal")
+
+    def test_hcss_insert_empty_paragraph_plan_noop_when_existing_matches(self) -> None:
+        input_docx = TMP / "input.docx"
+        first_work = TMP / "first.hdocx"
+        first_output = TMP / "first.docx"
+        second_work = TMP / "second.hdocx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, first_work)
+        (first_work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+        apply_hdocx(first_work, first_output)
+        export_docx(first_output, second_work)
+        (second_work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(second_work)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(plan["patches"], [])
+        self.assertEqual(plan["hcss"]["summary"]["patchCount"], 0)
+        self.assertEqual(plan["hcss"]["summary"]["noopCount"], 1)
+        self.assertEqual(plan["hcss"]["rules"][0]["noops"][0]["reason"], "idempotent-empty-paragraph-already-present")
+
+    def test_empty_paragraph_alignment_ignores_table_cell_child_id_shift(self) -> None:
+        input_docx = TMP / "table.docx"
+        work = TMP / "work.hdocx"
+        output_docx = TMP / "output.docx"
+        _make_table_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-after: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        apply_hdocx(work, output_docx)
+        diff = diff_docx(input_docx, output_docx)
+
+        self.assertEqual(diff["emptyParagraphDiff"]["summary"]["added"], 1)
+        self.assertTrue(diff["semanticDiff"]["identical"], diff["semanticDiff"])
+        self.assertEqual(diff["semanticDiff"]["changedNodes"], [])
+
+    def test_query_finds_text_formatting_headings_and_images(self) -> None:
+        input_docx = TMP / "query.docx"
+        work = TMP / "query.hdocx"
+        _make_query_docx(input_docx)
+        export_docx(input_docx, work)
+
+        keyword = query_hdocx(work, text="Keywords")
+        self.assertTrue(keyword["ok"], keyword)
+        self.assertEqual(keyword["matches"][0]["nodeId"], "p-000003")
+
+        heading = query_hdocx(
+            work,
+            align="center",
+            font_size="14pt",
+            font_family="SimHei",
+            suspected_heading_level1=True,
+        )
+        self.assertTrue(heading["ok"], heading)
+        self.assertEqual([match["nodeId"] for match in heading["matches"]], ["p-000002"])
+
+        images = find_hdocx(work, kind="image")
+        self.assertTrue(images["ok"], images)
+        self.assertEqual(images["matches"][0]["nodeId"], "r-000003")
+        self.assertEqual(images["matches"][0]["hostParagraph"]["nodeId"], "p-000004")
+
+    def test_assertion_checks_text_empty_paragraphs_and_image_spacing(self) -> None:
+        input_docx = TMP / "assert.docx"
+        work = TMP / "assert.hdocx"
+        _make_query_docx(input_docx)
+        export_docx(input_docx, work)
+
+        report = assert_hdocx(
+            work,
+            [
+                "text-payload-unchanged",
+                {"type": "paragraphs-have-empty-before", "paragraphIds": ["p-000002"]},
+                "images-host-paragraph-not-exact-line-spacing",
+                {"type": "level1-headings-have-empty-paragraph-before", "minScore": 3},
+            ],
+        )
+
+        self.assertTrue(report["ok"], report)
+        self.assertEqual(report["passedCount"], 4)
+
+    def test_assertion_fails_for_exact_image_host_spacing(self) -> None:
+        input_docx = TMP / "assert-image-exact.docx"
+        work = TMP / "assert-image-exact.hdocx"
+        _make_image_docx(input_docx, exact_line_spacing=True)
+        export_docx(input_docx, work)
+
+        report = assert_hdocx(work, ["images-host-paragraph-not-exact-line-spacing"])
+
+        self.assertFalse(report["ok"], report)
+        failure = report["assertions"][0]["failures"][0]
+        self.assertEqual(failure["imageRunId"], "r-000001")
+        self.assertEqual(failure["lineSpacingRule"]["lineRule"], "exact")
+
+    def test_level1_heading_assertion_excludes_preface_titles_by_default(self) -> None:
+        input_docx = TMP / "preface-heading.docx"
+        work = TMP / "preface-heading.hdocx"
+        _make_preface_heading_docx(input_docx)
+        export_docx(input_docx, work)
+
+        report = assert_hdocx(work, [{"type": "level1-headings-have-empty-paragraph-before", "minScore": 3}])
+
+        self.assertTrue(report["ok"], report)
+        assertion = report["assertions"][0]
+        self.assertEqual([heading["nodeId"] for heading in assertion["headings"]], ["p-000004"])
+        skipped_by_default = [
+            item for item in assertion["skippedHeadings"] if item["reason"] == "default-exclude-regex-match"
+        ]
+        self.assertEqual([item["nodeId"] for item in skipped_by_default], ["p-000002"])
+
+    def test_level1_heading_assertion_supports_include_and_exclude_regex(self) -> None:
+        input_docx = TMP / "preface-heading-regex.docx"
+        work = TMP / "preface-heading-regex.hdocx"
+        _make_preface_heading_docx(input_docx)
+        export_docx(input_docx, work)
+
+        included = assert_hdocx(
+            work,
+            [{"type": "level1-headings-have-empty-paragraph-before", "includeRegex": "Introduction"}],
+        )
+        excluded = assert_hdocx(
+            work,
+            [{"type": "level1-headings-have-empty-paragraph-before", "excludeRegex": "Introduction"}],
+        )
+
+        self.assertTrue(included["ok"], included)
+        self.assertEqual([heading["nodeId"] for heading in included["assertions"][0]["headings"]], ["p-000004"])
+        self.assertTrue(excluded["ok"], excluded)
+        self.assertEqual(excluded["assertions"][0]["checkedHeadingCount"], 0)
+        self.assertIn(
+            "exclude-regex-match",
+            [item["reason"] for item in excluded["assertions"][0]["skippedHeadings"]],
+        )
+
+    def test_assertion_after_apply_checks_planned_output_state(self) -> None:
+        input_docx = TMP / "after-apply.docx"
+        work = TMP / "after-apply.hdocx"
+        _make_minimal_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(paragraph-structure);
+
+#p-000001 {
+  hdocx-insert-empty-paragraph-before: true;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        current = assert_hdocx(work, [{"type": "paragraphs-have-empty-before", "paragraphIds": ["p-000001"]}])
+        planned = assert_hdocx(
+            work,
+            [{"type": "paragraphs-have-empty-before", "paragraphIds": ["p-000001"], "afterApply": True}],
+        )
+
+        self.assertFalse(current["ok"], current)
+        self.assertTrue(planned["ok"], planned)
+        assertion = planned["assertions"][0]
+        self.assertEqual(assertion["scope"], "planned-output")
+        self.assertEqual(assertion["nodeIdTranslations"], {"p-000001": "p-000002"})
 
     def test_chinese_and_special_filename_path_roundtrips(self) -> None:
         special_dir = TMP / "中文路径（测试）"
@@ -1227,6 +1710,10 @@ list-items {
         html_path = work / "document.html"
         html = html_path.read_text(encoding="utf-8")
         self.assertIn("[drawing]", html)
+        self.assertIn('<span class="hdocx-drawing-text" hidden>[drawing]</span>', html)
+        self.assertIn('<img class="hdocx-image-preview"', html)
+        self.assertIn('src="parts/word/media/image1.png"', html)
+        self.assertIn('style="width: 96px; height: 48px; object-fit: contain"', html)
         self.assertIn('data-hdocx-alt="Old alt"', html)
         html_path.write_text(
             html.replace('data-hdocx-alt="Old alt"', 'data-hdocx-alt="New alt"'),
@@ -1294,6 +1781,50 @@ list-items {
         self.assertEqual(extent.attrib["cx"], "1828800")
         self.assertEqual(extent.attrib["cy"], "914400")
         self.assertEqual(image_bytes, b"fakepng")
+
+    def test_hcss_image_formatting_sets_size_and_host_paragraph_spacing(self) -> None:
+        input_docx = TMP / "image.docx"
+        work = TMP / "work.hdocx"
+        output_docx = TMP / "output.docx"
+        _make_image_docx(input_docx)
+        export_docx(input_docx, work)
+        (work / "agent.edits.hcss").write_text(
+            """
+@hdocx-edit mode(image-formatting);
+
+#r-000001 {
+  hdocx-width-emu: 1828800;
+  hdocx-height-emu: 914400;
+  hdocx-alt: "Scaled image";
+  hdocx-paragraph-line-spacing: 1;
+  hdocx-paragraph-space-before: 0;
+  hdocx-paragraph-space-after: 0;
+}
+""",
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        plan = plan_hdocx(work)
+        apply_hdocx(work, output_docx)
+
+        self.assertTrue(plan["ok"], plan)
+        self.assertEqual(
+            [patch["operation"] for patch in plan["patches"]],
+            ["patch-drawing-properties", "patch-paragraph"],
+        )
+        with zipfile.ZipFile(output_docx, "r") as zf:
+            root = ET.fromstring(zf.read("word/document.xml"))
+        extent = root.find(".//wp:extent", NS)
+        self.assertEqual(extent.attrib["cx"], "1828800")
+        self.assertEqual(extent.attrib["cy"], "914400")
+        doc_pr = root.find(".//wp:docPr", NS)
+        self.assertEqual(doc_pr.attrib["descr"], "Scaled image")
+        spacing = root.find(".//w:p/w:pPr/w:spacing", NS)
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}line"], "240")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}lineRule"], "auto")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}before"], "0")
+        self.assertEqual(spacing.attrib[f"{{{W_NS}}}after"], "0")
 
     def test_image_size_removal_is_rejected(self) -> None:
         input_docx = TMP / "image.docx"
@@ -2693,7 +3224,7 @@ def _make_numbered_docx(path: Path) -> None:
         zf.writestr("word/numbering.xml", numbering)
 
 
-def _make_image_docx(path: Path) -> None:
+def _make_image_docx(path: Path, *, exact_line_spacing: bool = False) -> None:
     content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
@@ -2712,7 +3243,8 @@ def _make_image_docx(path: Path) -> None:
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
 </Relationships>
 """
-    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    paragraph_properties = '<w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr>' if exact_line_spacing else ""
+    document = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document
   xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -2720,6 +3252,7 @@ def _make_image_docx(path: Path) -> None:
   xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
   <w:body>
     <w:p>
+      {paragraph_properties}
       <w:r>
         <w:drawing>
           <wp:inline>
@@ -2747,6 +3280,124 @@ def _make_image_docx(path: Path) -> None:
         zf.writestr("word/_rels/document.xml.rels", document_rels)
         zf.writestr("word/document.xml", document)
         zf.writestr("word/media/image1.png", b"fakepng")
+
+
+def _make_query_docx(path: Path) -> None:
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+"""
+    document_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>
+</Relationships>
+"""
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document
+  xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+  xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+  xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+  xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr>
+    </w:p>
+    <w:p>
+      <w:pPr><w:jc w:val="center"/></w:pPr>
+      <w:r>
+        <w:rPr><w:b/><w:rFonts w:ascii="SimHei" w:hAnsi="SimHei" w:eastAsia="SimHei"/><w:sz w:val="28"/></w:rPr>
+        <w:t>1 First Heading</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:t>Keywords: artificial intelligence</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:jc w:val="center"/><w:spacing w:line="240" w:lineRule="auto"/></w:pPr>
+      <w:r>
+        <w:drawing>
+          <wp:inline>
+            <wp:extent cx="914400" cy="457200"/>
+            <wp:docPr id="1" name="Picture 1" descr="Query image"/>
+            <a:graphic>
+              <a:graphicData>
+                <a:pic>
+                  <a:blipFill>
+                    <a:blip r:embed="rId2"/>
+                  </a:blipFill>
+                </a:pic>
+              </a:graphicData>
+            </a:graphic>
+          </wp:inline>
+        </w:drawing>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>
+"""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("word/_rels/document.xml.rels", document_rels)
+        zf.writestr("word/document.xml", document)
+        zf.writestr("word/media/image1.png", b"fakepng")
+
+
+def _make_preface_heading_docx(path: Path) -> None:
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>
+"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>
+"""
+    abstract_title = "\u6458 \u8981"
+    document = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:pPr><w:jc w:val="center"/></w:pPr>
+      <w:r>
+        <w:rPr><w:b/><w:rFonts w:ascii="SimHei" w:hAnsi="SimHei" w:eastAsia="SimHei"/><w:sz w:val="32"/></w:rPr>
+        <w:t>Paper Title</w:t>
+      </w:r>
+    </w:p>
+    <w:p>
+      <w:pPr><w:jc w:val="center"/></w:pPr>
+      <w:r>
+        <w:rPr><w:b/><w:rFonts w:ascii="SimHei" w:hAnsi="SimHei" w:eastAsia="SimHei"/><w:sz w:val="28"/></w:rPr>
+        <w:t>{abstract_title}</w:t>
+      </w:r>
+    </w:p>
+    <w:p/>
+    <w:p>
+      <w:pPr><w:jc w:val="center"/></w:pPr>
+      <w:r>
+        <w:rPr><w:b/><w:rFonts w:ascii="SimHei" w:hAnsi="SimHei" w:eastAsia="SimHei"/><w:sz w:val="28"/></w:rPr>
+        <w:t>1 Introduction</w:t>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>
+"""
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("word/document.xml", document)
 
 
 def _make_equation_docx(path: Path) -> None:

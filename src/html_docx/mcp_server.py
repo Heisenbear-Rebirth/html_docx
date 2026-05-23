@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -12,6 +13,7 @@ from .errors import HDocxError
 from .fixtures import generate_pressure_fixtures
 from .hdocx import (
     apply_hdocx,
+    assert_hdocx,
     audit_docx,
     batch_check_docx,
     check_docx,
@@ -19,17 +21,21 @@ from .hdocx import (
     diff_docx,
     doctor_report,
     export_docx,
+    find_hdocx,
     inspect_hdocx,
     plan_hdocx,
+    query_hdocx,
     roundtrip_docx,
+    SUPPORTED_EDIT_MODES,
+    SUPPORTED_HCSS_AT_RULES,
+    SUPPORTED_HCSS_PROPERTIES,
     validate_hdocx,
 )
-from .rendering import render_check_docx
 from .utils import write_json
 
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_INFO = {"name": "html-docx-mcp", "version": "0.1.0"}
+SERVER_INFO = {"name": "html-docx-mcp", "version": "0.1.1"}
 ROOT_DESCRIPTION = (
     "Workspace root. Defaults to HDOCX_MCP_ROOT, then CLAUDE_PROJECT_DIR, "
     "then the MCP server current directory."
@@ -62,6 +68,7 @@ class PromptTemplate:
 
 
 def main() -> int:
+    _configure_stdio_utf8()
     server = HDocxMcpServer()
     return server.run()
 
@@ -263,13 +270,113 @@ class HDocxMcpServer:
         )
 
 
+def _configure_stdio_utf8() -> None:
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        kwargs = {"encoding": "utf-8"}
+        if stream_name == "stdin":
+            kwargs["errors"] = "surrogateescape"
+        else:
+            kwargs["errors"] = "strict"
+        try:
+            reconfigure(**kwargs)
+        except (OSError, ValueError):
+            pass
+
+
+def _mcp_doctor_tool(args: dict[str, Any]) -> dict[str, Any]:
+    report = doctor_report()
+    guidance_info = _guidance_runtime_info()
+    report["mcp"] = {
+        "serverInfo": SERVER_INFO,
+        "loadedModulePath": str(Path(__file__).resolve()),
+        "loaded_module_path": str(Path(__file__).resolve()),
+        "moduleMtimeUtc": _module_mtime(Path(__file__).resolve()),
+        "stdioEncoding": {
+            "stdin": getattr(sys.stdin, "encoding", None),
+            "stdout": getattr(sys.stdout, "encoding", None),
+            "stderr": getattr(sys.stderr, "encoding", None),
+        },
+        "concurrencyPolicy": {
+            "toolCallsSerializedByServerInstance": True,
+            "busyErrorCode": "MCP_SERVER_BUSY",
+            "note": "Clients may still appear to run quick calls in parallel if they deliver them sequentially to this stdio server.",
+        },
+        "guidance": guidance_info,
+        "guidance_source_path": guidance_info["sourcePath"],
+        "guidance_version": guidance_info["sha256ByTopic"],
+    }
+    report["runtime"]["guidance_source_path"] = guidance_info["sourcePath"]
+    report["runtime"]["guidance_version"] = guidance_info["sha256ByTopic"]
+    return report
+
+
+def _module_mtime(path: Path) -> str | None:
+    try:
+        from datetime import datetime, timezone
+
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return None
+
+
+def _guidance_runtime_info() -> dict[str, Any]:
+    guidance_map = {
+        "workflow": WORKFLOW_GUIDANCE,
+        "format": WRITING_FORMAT_GUIDANCE,
+        "query": QUERY_GUIDANCE,
+        "hcss": f"{HCSS_GUIDANCE}\n\n{_hcss_capability_registry_markdown()}",
+        "acceptance": ACCEPTANCE_GUIDANCE,
+        "edge-cases": EDGE_CASE_GUIDANCE,
+    }
+    return {
+        "sourcePath": str(Path(__file__).resolve()),
+        "topics": sorted(guidance_map),
+        "sha256ByTopic": {
+            topic: hashlib.sha256(text.encode("utf-8")).hexdigest()
+            for topic, text in guidance_map.items()
+        },
+    }
+
+
+def _hcss_capability_registry_markdown() -> str:
+    lines = [
+        "## Runtime H-CSS Capability Registry",
+        "",
+        "This section is generated from the runtime capability registry used by `hdocx_plan`.",
+        "",
+        "Supported edit modes:",
+        "",
+    ]
+    for mode in SUPPORTED_EDIT_MODES:
+        lines.append(f"- `{mode}`")
+    lines.extend(["", "Supported properties by mode:", ""])
+    for mode in SUPPORTED_EDIT_MODES:
+        properties = SUPPORTED_HCSS_PROPERTIES.get(mode, [])
+        lines.append(f"### `{mode}`")
+        if not properties:
+            lines.append("")
+            lines.append("- No direct H-CSS declarations registered.")
+        else:
+            for prop in properties:
+                lines.append(f"- `{prop}`")
+        lines.append("")
+    lines.extend(["Supported H-CSS at-rules:", ""])
+    for at_rule in SUPPORTED_HCSS_AT_RULES:
+        lines.append(f"- `{at_rule}`")
+    return "\n".join(lines).rstrip()
+
+
 def _build_tools() -> dict[str, Tool]:
     tools = [
         Tool(
             "hdocx_doctor",
-            "Report html_docx runtime capabilities and optional renderer availability.",
+            "Report html_docx runtime capabilities.",
             _schema(properties={}),
-            lambda args: doctor_report(),
+            _mcp_doctor_tool,
         ),
         Tool(
             "hdocx_guidance",
@@ -278,7 +385,7 @@ def _build_tools() -> dict[str, Tool]:
                 properties={
                     "topic": {
                         "type": "string",
-                        "enum": ["all", "workflow", "format", "hcss", "acceptance", "edge-cases"],
+                        "enum": ["all", "workflow", "format", "query", "hcss", "acceptance", "edge-cases"],
                         "description": "Guidance topic. Defaults to all.",
                     }
                 }
@@ -386,6 +493,39 @@ def _build_tools() -> dict[str, Tool]:
                 args,
                 inspect_hdocx(_path_arg(args, "bundle", must_exist=True), str(args["id"]), kind=str(args.get("kind", "node"))),
             ),
+        ),
+        Tool(
+            "hdocx_query",
+            "Query projected H-DOCX nodes by text, font, size, paragraph properties, images, or likely level-1 headings.",
+            _query_tool_schema(),
+            lambda args: _with_report(args, query_hdocx(_path_arg(args, "bundle", must_exist=True), **_query_tool_kwargs(args))),
+        ),
+        Tool(
+            "hdocx_find",
+            "Alias for hdocx_query; returns structured JSON so agents do not need to read document.html.",
+            _query_tool_schema(),
+            lambda args: _with_report(args, find_hdocx(_path_arg(args, "bundle", must_exist=True), **_query_tool_kwargs(args))),
+        ),
+        Tool(
+            "hdocx_assert",
+            "Run assertion-style acceptance checks over an H-DOCX bundle.",
+            _schema(
+                required=["bundle"],
+                properties={
+                    "root": _string(ROOT_DESCRIPTION),
+                    "bundle": _string("H-DOCX bundle directory under root."),
+                    "assertions": {
+                        "type": "array",
+                        "items": {
+                            "type": ["object", "string"],
+                            "description": "Assertion string or object with a type field and optional parameters such as afterApply, includeRegex, excludeRegex, or paragraphIds.",
+                        },
+                        "description": "Assertions to run. Defaults to text-payload-unchanged. Set afterApply/plannedOutput on an assertion object to check the planned output state.",
+                    },
+                    "report": _string("Optional JSON report path under root."),
+                },
+            ),
+            lambda args: _with_report(args, assert_hdocx(_path_arg(args, "bundle", must_exist=True), _assertions_arg(args))),
         ),
         Tool(
             "hdocx_plan",
@@ -514,32 +654,6 @@ def _build_tools() -> dict[str, Tool]:
             ),
             lambda args: _with_report(args, generate_pressure_fixtures(_path_arg(args, "out"), force=bool(args.get("force", False)))),
         ),
-        Tool(
-            "hdocx_render_check",
-            "Optionally render a DOCX to PDF with LibreOffice/soffice for visual QA.",
-            _schema(
-                required=["input", "out"],
-                properties={
-                    "root": _string(ROOT_DESCRIPTION),
-                    "input": _string("Input DOCX path under root."),
-                    "out": _string("Output render directory under root."),
-                    "force": _boolean("Replace an existing render directory."),
-                    "allowMissing": _boolean("Return a structured renderer-missing report when LibreOffice/soffice is unavailable."),
-                    "timeoutSeconds": {"type": "integer", "minimum": 1, "description": "Render timeout in seconds. Defaults to 120."},
-                    "report": _string("Optional JSON report path under root."),
-                },
-            ),
-            lambda args: _with_report(
-                args,
-                render_check_docx(
-                    _path_arg(args, "input", must_exist=True),
-                    _path_arg(args, "out"),
-                    force=bool(args.get("force", False)),
-                    allow_missing=bool(args.get("allowMissing", False)),
-                    timeout_seconds=int(args.get("timeoutSeconds", 120)),
-                ),
-            ),
-        ),
     ]
     return {tool.name: tool for tool in tools}
 
@@ -562,7 +676,13 @@ def _build_resources() -> dict[str, GuideResource]:
             "hdocx://guide/hcss",
             "H-CSS selectors and formatting rules",
             "Supported selector and reusable formatting patterns.",
-            HCSS_GUIDANCE,
+            f"{HCSS_GUIDANCE}\n\n{_hcss_capability_registry_markdown()}",
+        ),
+        GuideResource(
+            "hdocx://guide/query",
+            "H-DOCX query and assertion tools",
+            "Structured target discovery and assertion-style acceptance.",
+            QUERY_GUIDANCE,
         ),
         GuideResource(
             "hdocx://guide/acceptance",
@@ -649,20 +769,26 @@ For an existing document:
 
 1. Run `hdocx_audit` on the source DOCX.
 2. Run `hdocx_export` to create a `.hdocx` bundle.
-3. Run `hdocx_inspect` before targeting styles, lists, tables, images, or
+3. Run `hdocx_query` / `hdocx_find` before reading `document.html` directly.
+   Use them to locate text, formatting, images and likely level-1 headings.
+4. Run `hdocx_inspect` before targeting styles, lists, tables, images, or
    specific paragraphs/runs.
-4. Edit only allowed bundle surfaces: editable run text in `document.html`,
+5. Edit only allowed bundle surfaces: editable run text in `document.html`,
    supported rules in `agent.edits.hcss`, and supported bundle-local assets.
-5. Run `hdocx_plan` before writing an output DOCX.
-6. Run `hdocx_apply` to produce the output DOCX.
-7. Run `hdocx_diff` against the original before claiming success.
+6. Run `hdocx_plan` before writing an output DOCX.
+7. Run `hdocx_apply` to produce the output DOCX.
+8. Run `hdocx_diff` against the original before claiming success.
+9. Run `hdocx_assert` for task-specific invariants such as unchanged text
+   payload, structural blank paragraphs, and image host paragraph spacing.
 
 For no-edit reversibility proof, use `hdocx_check` directly. A byte-identical
 SHA256 match is stronger than render equality for unedited round-trips.
 
-MCP tool calls should be serialized. If a client issues concurrent calls, the
-server returns a structured `MCP_SERVER_BUSY` error instead of allowing a
-second operation to interfere with the stdio transport.
+MCP tool calls should be serialized. If two tool handlers overlap inside the
+same server instance, the server returns a structured `MCP_SERVER_BUSY` error
+instead of allowing a second operation to interfere with the stdio transport.
+Some clients queue quick calls even when the agent asks for them in parallel;
+those calls may both succeed because they reached the server sequentially.
 """
 
 
@@ -692,6 +818,63 @@ guessing.
 """
 
 
+QUERY_GUIDANCE = """# H-DOCX Query And Assert Tools
+
+Use `hdocx_query` / `hdocx_find` before reading `document.html` directly. They
+return structured JSON from the H-DOCX projection manifest and avoid terminal
+encoding problems with large or multilingual HTML.
+
+Common target discovery:
+
+```json
+{"bundle":"work.hdocx","text":"Keywords"}
+{"bundle":"work.hdocx","align":"center","fontSize":"14pt","fontFamily":"SimHei","suspectedHeadingLevel1":true}
+{"bundle":"work.hdocx","kind":"image"}
+```
+
+Query filters include `text`, `textRegex`, `styleId`, `fontFamily`,
+`eastAsiaFont`, `fontSize`, `bold`, `italic`, `color`, `align`, `lineSpacing`,
+`spaceBefore`, `spaceAfter`, `hasImage`, and `suspectedHeadingLevel1`.
+
+Use `hdocx_assert` after edits for explicit acceptance checks:
+
+```json
+{
+  "bundle": "work.hdocx",
+  "assertions": [
+    "text-payload-unchanged",
+    "images-host-paragraph-not-exact-line-spacing",
+    {"type":"paragraphs-have-empty-before","paragraphIds":["p-000006"]},
+    {"type":"paragraphs-have-empty-before","paragraphIds":["p-000006"],"afterApply":true},
+    {"type":"level1-headings-have-empty-paragraph-before","minScore":3,"includeRegex":"^\\\\d+","excludeRegex":"Appendix"}
+  ]
+}
+```
+
+Supported assertions:
+
+- `text-payload-unchanged`
+- `paragraphs-have-empty-before`
+- `paragraphs-have-empty-after`
+- `images-host-paragraph-not-exact-line-spacing`
+- `level1-headings-have-empty-paragraph-before`
+
+Assertion scope:
+
+- Without `afterApply`, structure and formatting assertions inspect the current
+  exported bundle. `text-payload-unchanged` checks the planned patch list.
+- With `afterApply: true` or `plannedOutput: true`, the server applies the
+  current plan to a bundle-local scratch DOCX, exports it again, maps original
+  paragraph ids to the planned output when possible, and checks that output
+  state.
+- `level1-headings-have-empty-paragraph-before` is heuristic. It supports
+  `includeRegex`, `excludeRegex`, `paragraphIds`, `minScore`,
+  `allowFirstInPart`, and `useDefaultExcludes`. By default it excludes
+  front-matter labels such as abstract, contents/table of contents, and
+  keywords.
+"""
+
+
 HCSS_GUIDANCE = """# H-CSS Selector And Formatting Guidance
 
 Use `agent.edits.hcss` for controlled formatting edits. Prefer inspected ids or
@@ -702,6 +885,10 @@ Recommended targeting patterns:
 ```css
 @hdocx-set target-paragraph {
   select: id(p-000001);
+}
+
+@hdocx-set selected-body {
+  select: id(p-000007), id(p-000008), id(p-000009);
 }
 
 @hdocx-set body-style {
@@ -728,8 +915,20 @@ If a selector is allowed to match nothing, say so explicitly:
 
 Selector support is intentionally small: ids, classes, exact attribute
 selectors, class+attribute compounds such as
-`.hdocx-r[data-hdocx-id="r-000001"]`, and the H-DOCX functions above. Comma
-grouping selectors are not supported; use `@hdocx-set` blocks instead.
+`.hdocx-r[data-hdocx-id="r-000001"]`, selector lists separated by commas, and
+the H-DOCX functions above.
+
+Do not add custom grouping classes or other projection metadata to
+`document.html`; that file's read-only metadata is part of the reversible
+projection. Put reusable groups in `agent.edits.hcss` with `@hdocx-set`, or use
+comma selector lists directly:
+
+```css
+.role-body,
+.role-reference {
+  hdocx-font-size: 10.5pt;
+}
+```
 
 Do not use broad selectors when the user asked for a narrow change. Do not
 write normal CSS properties unless H-DOCX explicitly supports them.
@@ -764,6 +963,40 @@ Paragraph formatting, used with `@hdocx-edit mode(paragraph-formatting);`:
 | `hdocx-line-spacing-exact` | positive `pt`, such as `18pt` | `w:spacing @w:lineRule="exact"` |
 | `hdocx-space-before` | `0`, non-negative `pt`, or `line`, such as `0.5line` | `w:spacing @w:before` or `@w:beforeLines` |
 | `hdocx-space-after` | `0`, non-negative `pt`, or `line`, such as `0.5line` | `w:spacing @w:after` or `@w:afterLines` |
+| `hdocx-manual-page-break-before` | `true` or `false` | insert an idempotent `<w:br w:type="page"/>` paragraph before the target |
+
+Image formatting, used with `@hdocx-edit mode(image-formatting);`:
+
+Use this for existing projected images. It targets drawing runs, or paragraphs
+containing drawing runs. Host paragraph declarations are included because
+academic body styles with exact line spacing can clip inline images.
+
+| H-CSS declaration | Value | OOXML |
+| --- | --- | --- |
+| `hdocx-alt` | quoted or bare text | `wp:docPr @descr` |
+| `hdocx-width-emu` | positive EMU integer | `wp:extent @cx` |
+| `hdocx-height-emu` | positive EMU integer | `wp:extent @cy` |
+| `hdocx-paragraph-line-spacing` | positive multiple or exact `pt` | host paragraph `w:spacing` |
+| `hdocx-paragraph-line-spacing-exact` | positive `pt` | host paragraph exact `w:spacing` |
+| `hdocx-paragraph-space-before` | `0`, non-negative `pt`, or `line` | host paragraph spacing before |
+| `hdocx-paragraph-space-after` | `0`, non-negative `pt`, or `line` | host paragraph spacing after |
+| `hdocx-paragraph-text-align` or `hdocx-paragraph-align` | `left`, `center`, `right`, `justify`/`both` | host paragraph alignment |
+
+Paragraph structure, used with `@hdocx-edit mode(paragraph-structure);`:
+
+Use this for real blank lines: H-DOCX inserts an empty Word paragraph, not just
+spacing on a neighboring paragraph. `hdocx_diff` reports these changes under
+`emptyParagraphDiff` and aligns later semantic nodes.
+
+| H-CSS declaration | Value | OOXML |
+| --- | --- | --- |
+| `hdocx-insert-empty-paragraph-before` | `true` or `false` | idempotent empty `<w:p>` before the target |
+| `hdocx-insert-empty-paragraph-after` | `true` or `false` | idempotent empty `<w:p>` after the target |
+| `hdocx-empty-paragraph-style-id` | existing simple style id | inserted empty paragraph `w:pStyle` |
+| `hdocx-empty-paragraph-line-spacing` | positive multiple or exact `pt` | inserted empty paragraph `w:spacing` |
+| `hdocx-empty-paragraph-line-spacing-exact` | positive `pt`, such as `12pt` | inserted empty paragraph exact `w:spacing` |
+| `hdocx-empty-paragraph-space-before` | `0`, non-negative `pt`, or `line` | inserted empty paragraph spacing before |
+| `hdocx-empty-paragraph-space-after` | `0`, non-negative `pt`, or `line` | inserted empty paragraph spacing after |
 
 Example for paper body text:
 
@@ -791,6 +1024,45 @@ body {
 }
 ```
 
+Manual page break before a first-level heading. `hdocx_diff` reports these
+changes under `manualPageBreakDiff` and aligns later semantic nodes so inserted
+break paragraphs do not look like text edits:
+
+```css
+@hdocx-edit mode(paragraph-formatting);
+
+.hdocx-p[data-hdocx-id="p-000006"] {
+  hdocx-manual-page-break-before: true;
+}
+```
+
+Real blank line after a paragraph:
+
+```css
+@hdocx-edit mode(paragraph-structure);
+
+#p-000010 {
+  hdocx-insert-empty-paragraph-after: true;
+  hdocx-empty-paragraph-line-spacing-exact: 12pt;
+  hdocx-empty-paragraph-space-before: 0;
+  hdocx-empty-paragraph-space-after: 0;
+}
+```
+
+Existing image that should not be clipped by body fixed line spacing:
+
+```css
+@hdocx-edit mode(image-formatting);
+
+#r-000001 {
+  hdocx-width-emu: 1828800;
+  hdocx-height-emu: 914400;
+  hdocx-paragraph-line-spacing: 1;
+  hdocx-paragraph-space-before: 0;
+  hdocx-paragraph-space-after: 0;
+}
+```
+
 Always run `hdocx_plan` and inspect the resulting target set, declaration
 diagnostics, and patch list before applying.
 """
@@ -803,8 +1075,8 @@ Minimum acceptance before claiming success:
 - Source changes: run the unit tests.
 - New or unknown DOCX family: run `hdocx_audit` and `hdocx_check`.
 - Edited DOCX: run `hdocx_plan`, `hdocx_apply`, and `hdocx_diff`.
-- Formatting-sensitive work: run `hdocx_render_check` when LibreOffice/soffice
-  is available, or report that render QA was unavailable.
+- Format-only tasks: run `hdocx_assert` with relevant assertions, especially
+  `text-payload-unchanged` and image/blank-paragraph assertions.
 - Batch or conversion-logic changes: run generated fixture pressure checks.
 
 For unedited round-trips, success means byte-identical package output. For
@@ -837,12 +1109,14 @@ def _guidance_tool(args: dict[str, Any]) -> dict[str, Any]:
     topic_resources = {
         "workflow": ["hdocx://guide/workflow"],
         "format": ["hdocx://guide/writing-format"],
+        "query": ["hdocx://guide/query"],
         "hcss": ["hdocx://guide/hcss"],
         "acceptance": ["hdocx://guide/acceptance"],
         "edge-cases": ["hdocx://guide/edge-cases"],
         "all": [
             "hdocx://guide/workflow",
             "hdocx://guide/writing-format",
+            "hdocx://guide/query",
             "hdocx://guide/hcss",
             "hdocx://guide/acceptance",
             "hdocx://guide/edge-cases",
@@ -857,6 +1131,7 @@ def _guidance_tool(args: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "topic": topic,
         "guidance": "\n\n".join(resource.text for resource in selected),
+        "guidanceRuntime": _guidance_runtime_info(),
         "resources": [
             {
                 "uri": resource.uri,
@@ -897,17 +1172,20 @@ Goal: {goal}
 Before editing, read these MCP resources:
 - hdocx://guide/workflow
 - hdocx://guide/writing-format
+- hdocx://guide/query
 - hdocx://guide/hcss
 - hdocx://guide/acceptance
 
 Required calls:
 1. hdocx_audit(root, input={input_docx})
 2. hdocx_export(root, input={input_docx}, out={work}, force=true)
-3. hdocx_inspect(root, bundle={work}, ...) for every nontrivial target
-4. Edit only supported H-DOCX surfaces.
-5. hdocx_plan(root, bundle={work})
-6. hdocx_apply(root, bundle={work}, out={out})
-7. hdocx_diff(root, left={input_docx}, right={out})
+3. hdocx_query(root, bundle={work}, ...) or hdocx_find(...) to discover targets
+4. hdocx_inspect(root, bundle={work}, ...) for every nontrivial exact target
+5. Edit only supported H-DOCX surfaces.
+6. hdocx_plan(root, bundle={work})
+7. hdocx_apply(root, bundle={work}, out={out})
+8. hdocx_diff(root, left={input_docx}, right={out})
+9. hdocx_assert(root, bundle={work}, assertions=[...]) for task-specific invariants
 
 Never change read-only ids, manifest metadata, original/original.docx, or
 protected placeholders. If the edit cannot be proven safe, stop with a report.
@@ -959,16 +1237,19 @@ Output DOCX: {out}
 Target: {target}
 Goal: {goal}
 
-Read hdocx://guide/hcss and hdocx://guide/writing-format first.
+Read hdocx://guide/query, hdocx://guide/hcss and
+hdocx://guide/writing-format first.
 
 Workflow:
 1. hdocx_audit(root, input={input_docx})
 2. hdocx_export(root, input={input_docx}, out={work}, force=true)
-3. hdocx_inspect(root, bundle={work}, kind=node/style/list/table/image, id=...)
-4. Write the narrowest supported H-CSS rule in {work}/agent.edits.hcss.
-5. hdocx_plan(root, bundle={work}) and verify target counts.
-6. hdocx_apply(root, bundle={work}, out={out})
-7. hdocx_diff(root, left={input_docx}, right={out})
+3. hdocx_query(root, bundle={work}, ...) to find candidate targets
+4. hdocx_inspect(root, bundle={work}, kind=node/style/list/table/image, id=...)
+5. Write the narrowest supported H-CSS rule in {work}/agent.edits.hcss.
+6. hdocx_plan(root, bundle={work}) and verify target counts.
+7. hdocx_apply(root, bundle={work}, out={out})
+8. hdocx_diff(root, left={input_docx}, right={out})
+9. hdocx_assert(root, bundle={work}, assertions=["text-payload-unchanged", ...])
 
 Use inspected ids or @hdocx-set definitions. If a selector may match nothing,
 declare allow-empty: true. Do not approximate unsupported formatting.
@@ -1005,6 +1286,74 @@ def _schema(*, properties: dict[str, Any], required: list[str] | None = None) ->
     }
 
 
+def _query_tool_schema() -> dict[str, Any]:
+    return _schema(
+        required=["bundle"],
+        properties={
+            "root": _string(ROOT_DESCRIPTION),
+            "bundle": _string("H-DOCX bundle directory under root."),
+            "kind": {
+                "type": "string",
+                "enum": ["paragraph", "run", "image", "all"],
+                "description": "Node kind to query. Defaults to paragraph.",
+            },
+            "text": _string("Substring to find in visible run text or paragraph text."),
+            "textRegex": _string("Regular expression to match visible text."),
+            "styleId": _string("Exact paragraph style id."),
+            "fontFamily": _string("Exact run font family; checks latin and east Asia font slots."),
+            "eastAsiaFont": _string("Exact run east Asia font."),
+            "fontSize": _string("Exact run font size, e.g. 14pt."),
+            "bold": _boolean("Require bold true/false."),
+            "italic": _boolean("Require italic true/false."),
+            "color": _string("Exact run color, e.g. #ff0000."),
+            "align": _string("Exact paragraph alignment such as center, left, right, justify."),
+            "lineSpacing": _string("Exact paragraph line spacing, e.g. 1.5 or 18pt."),
+            "spaceBefore": _string("Exact paragraph space before, e.g. 0pt or 0.5line."),
+            "spaceAfter": _string("Exact paragraph space after, e.g. 0pt or 0.5line."),
+            "hasImage": _boolean("Require paragraph/run to contain an image drawing."),
+            "suspectedHeadingLevel1": _boolean("Filter by heuristic likely level-1 headings."),
+            "includeRuns": _boolean("Include run summaries for paragraph matches. Defaults true."),
+            "limit": {"type": "integer", "minimum": 1, "description": "Maximum matches to return. Defaults to 100."},
+            "report": _string("Optional JSON report path under root."),
+        },
+    )
+
+
+def _query_tool_kwargs(args: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": str(args.get("kind", "paragraph")),
+        "text": args.get("text"),
+        "text_regex": args.get("textRegex"),
+        "style_id": args.get("styleId"),
+        "font_family": args.get("fontFamily"),
+        "east_asia_font": args.get("eastAsiaFont"),
+        "font_size": args.get("fontSize"),
+        "bold": args.get("bold"),
+        "italic": args.get("italic"),
+        "color": args.get("color"),
+        "align": args.get("align"),
+        "line_spacing": args.get("lineSpacing"),
+        "space_before": args.get("spaceBefore"),
+        "space_after": args.get("spaceAfter"),
+        "has_image": args.get("hasImage"),
+        "suspected_heading_level1": args.get("suspectedHeadingLevel1"),
+        "include_runs": bool(args.get("includeRuns", True)),
+        "limit": int(args.get("limit", 100)),
+    }
+
+
+def _assertions_arg(args: dict[str, Any]) -> list[Any] | None:
+    value = args.get("assertions")
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HDocxError("MCP_INVALID_ARGUMENT", "assertions must be an array.", {"argument": "assertions"})
+    for item in value:
+        if not isinstance(item, (str, dict)):
+            raise HDocxError("MCP_INVALID_ARGUMENT", "Each assertion must be a string or object.", {"argument": "assertions"})
+    return value
+
+
 def _string(description: str) -> dict[str, Any]:
     return {"type": "string", "description": description}
 
@@ -1017,6 +1366,7 @@ def _path_arg(args: dict[str, Any], name: str, *, must_exist: bool = False) -> P
     value = args.get(name)
     if not isinstance(value, str) or not value:
         raise HDocxError("MCP_INVALID_ARGUMENT", f"Missing or invalid path argument: {name}.", {"argument": name})
+    _validate_path_text(value, name)
     root = _root_arg(args)
     candidate = Path(value)
     if not candidate.is_absolute():
@@ -1054,7 +1404,19 @@ def _root_arg(args: dict[str, Any]) -> Path:
         return Path.cwd().resolve()
     if not isinstance(raw_root, str) or not raw_root:
         raise HDocxError("MCP_INVALID_ARGUMENT", "root must be a non-empty string.", {"argument": "root"})
+    _validate_path_text(raw_root, "root")
     return Path(raw_root).resolve()
+
+
+def _validate_path_text(value: str, argument: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise HDocxError(
+            "PATH_ENCODING_ERROR",
+            "Path contains characters that cannot be encoded safely.",
+            {"argument": argument, "pathRepr": repr(value)},
+        ) from exc
 
 
 def _ensure_under_root(path: Path, root: Path, *, argument: str) -> None:
@@ -1079,7 +1441,7 @@ def _with_report(args: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any
 
 
 def _tool_response(request_id: Any, payload: dict[str, Any], *, is_error: bool) -> dict[str, Any]:
-    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    text = json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True)
     result: dict[str, Any] = {
         "content": [{"type": "text", "text": text}],
         "structuredContent": payload,
